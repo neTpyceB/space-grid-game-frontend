@@ -1,19 +1,26 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  fetchHealthStatusLongPoll,
-  fetchHealthStatusSnapshot,
-  UnsupportedLongPollingError,
-} from './healthApi'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const originalFetch = globalThis.fetch
+const originalApiBase = import.meta.env.VITE_API_BASE_URL
+
+async function importHealthApi() {
+  vi.resetModules()
+  return import('./healthApi')
+}
+
+beforeEach(() => {
+  import.meta.env.VITE_API_BASE_URL = ''
+})
 
 afterEach(() => {
   vi.restoreAllMocks()
   globalThis.fetch = originalFetch
+  import.meta.env.VITE_API_BASE_URL = originalApiBase
 })
 
 describe('fetchHealthStatusSnapshot', () => {
   it('requests the new server status endpoint and parses JSON status', async () => {
+    const { fetchHealthStatusSnapshot } = await importHealthApi()
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ status: 'ok' }), {
         status: 200,
@@ -35,7 +42,27 @@ describe('fetchHealthStatusSnapshot', () => {
     expect(result).toEqual({ kind: 'up', statusText: 'ok' })
   })
 
+  it('uses VITE_API_BASE_URL when provided (Railway Builder deployment)', async () => {
+    import.meta.env.VITE_API_BASE_URL = 'https://space-grid-game-backend.up.railway.app/'
+    const { fetchHealthStatusSnapshot } = await importHealthApi()
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: 'ok' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    globalThis.fetch = fetchMock as typeof fetch
+
+    await fetchHealthStatusSnapshot()
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://space-grid-game-backend.up.railway.app/api/server/status',
+      expect.any(Object),
+    )
+  })
+
   it('parses plain-text responses as status text', async () => {
+    const { fetchHealthStatusSnapshot } = await importHealthApi()
     const fetchMock = vi.fn().mockResolvedValue(
       new Response('OK', {
         status: 200,
@@ -50,6 +77,7 @@ describe('fetchHealthStatusSnapshot', () => {
   })
 
   it('returns DOWN result on HTTP error', async () => {
+    const { fetchHealthStatusSnapshot } = await importHealthApi()
     const fetchMock = vi.fn().mockResolvedValue(
       new Response('fail', {
         status: 503,
@@ -68,7 +96,8 @@ describe('fetchHealthStatusSnapshot', () => {
 })
 
 describe('fetchHealthStatusLongPoll', () => {
-  it('requests the new long-poll endpoint with cursor and timeout and parses response', async () => {
+  it('requests the long-poll endpoint with cursor and timeout and parses response', async () => {
+    const { fetchHealthStatusLongPoll } = await importHealthApi()
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -99,6 +128,8 @@ describe('fetchHealthStatusLongPoll', () => {
   })
 
   it('throws unsupported error when long-poll endpoint is not implemented', async () => {
+    const { fetchHealthStatusLongPoll, UnsupportedLongPollingError } =
+      await importHealthApi()
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(null, {
         status: 404,
@@ -113,6 +144,7 @@ describe('fetchHealthStatusLongPoll', () => {
   })
 
   it('returns DOWN cycle on transient network error and keeps cursor', async () => {
+    const { fetchHealthStatusLongPoll } = await importHealthApi()
     const fetchMock = vi.fn().mockRejectedValue(new Error('network failed'))
     globalThis.fetch = fetchMock as typeof fetch
 

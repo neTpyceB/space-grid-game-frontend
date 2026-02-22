@@ -21,6 +21,12 @@ type HealthJson = {
   timeout?: unknown
 }
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
+
+function apiUrl(path: string): string {
+  return API_BASE_URL ? `${API_BASE_URL}${path}` : path
+}
+
 function getDownResult(error: unknown): HealthCheckResult {
   const message = error instanceof Error ? error.message : 'Unknown error'
 
@@ -53,7 +59,7 @@ export async function fetchHealthStatusSnapshot(
   signal?: AbortSignal,
 ): Promise<HealthCheckResult> {
   try {
-    const response = await fetch('/api/server/status', {
+    const response = await fetch(apiUrl('/api/server/status'), {
       signal,
       headers: {
         Accept: 'application/json, text/plain;q=0.9, */*;q=0.8',
@@ -105,7 +111,7 @@ export async function fetchHealthStatusLongPoll(
 
   try {
     const response = await fetch(
-      `/api/server/status/long-poll?${query.toString()}`,
+      apiUrl(`/api/server/status/long-poll?${query.toString()}`),
       {
         signal,
         headers: {

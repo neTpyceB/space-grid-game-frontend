@@ -8,6 +8,7 @@ import {
 
 const FALLBACK_POLL_INTERVAL_MS = 5000
 const ERROR_RETRY_MS = 2000
+const MAX_ERROR_RETRY_MS = 10000
 
 type TransportMode = 'long-poll' | 'polling-fallback'
 
@@ -35,6 +36,7 @@ export function HealthStatus() {
     let cursor: string | null = null
     let transportMode: TransportMode = 'long-poll'
     let activeController: AbortController | null = null
+    let recoveryRetryMs = ERROR_RETRY_MS
 
     const publish = (
       result: HealthCheckResult,
@@ -63,6 +65,45 @@ export function HealthStatus() {
               activeController.signal,
             )
 
+            if (cycle.result.kind === 'down') {
+              publish(
+                cycle.result,
+                'long-poll',
+                `Long poll connection failed. Retrying in ${Math.round(
+                  recoveryRetryMs / 1000,
+                )}s.`,
+              )
+
+              await sleep(recoveryRetryMs)
+              if (!isActive) return
+
+              activeController = new AbortController()
+              const probe = await fetchHealthStatusSnapshot(activeController.signal)
+
+              if (probe.kind === 'up') {
+                recoveryRetryMs = ERROR_RETRY_MS
+                // Force a fresh long-poll subscribe after recovery so backend can reply immediately.
+                cursor = null
+                publish(
+                  probe,
+                  'long-poll',
+                  'Server reachable again. Re-establishing long poll connection.',
+                )
+              } else {
+                recoveryRetryMs = Math.min(recoveryRetryMs * 2, MAX_ERROR_RETRY_MS)
+                publish(
+                  probe,
+                  'long-poll',
+                  `Server still unreachable. Backing off to ${Math.round(
+                    recoveryRetryMs / 1000,
+                  )}s retries.`,
+                )
+              }
+
+              continue
+            }
+
+            recoveryRetryMs = ERROR_RETRY_MS
             cursor = cycle.cursor ?? cursor
             publish(
               cycle.result,
@@ -75,6 +116,7 @@ export function HealthStatus() {
           }
 
           const result = await fetchHealthStatusSnapshot(activeController.signal)
+          recoveryRetryMs = ERROR_RETRY_MS
           publish(
             result,
             'polling-fallback',
@@ -103,7 +145,8 @@ export function HealthStatus() {
             transportMode,
             'Retrying after temporary connection error.',
           )
-          await sleep(ERROR_RETRY_MS)
+          await sleep(recoveryRetryMs)
+          recoveryRetryMs = Math.min(recoveryRetryMs * 2, MAX_ERROR_RETRY_MS)
         }
       }
     }

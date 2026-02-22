@@ -102,7 +102,7 @@ export async function fetchHealthStatusLongPoll(
   signal?: AbortSignal,
 ): Promise<HealthLongPollCycle> {
   const query = new URLSearchParams({
-    timeoutSeconds: '30',
+    timeoutSeconds: '25',
   })
 
   if (sinceCursor) {

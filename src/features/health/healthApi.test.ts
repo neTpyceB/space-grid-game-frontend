@@ -119,7 +119,7 @@ describe('fetchHealthStatusLongPoll', () => {
     const [url] = fetchMock.mock.calls[0]
     expect(String(url)).toContain('/api/server/status/long-poll?')
     expect(String(url)).toContain('since=v1')
-    expect(String(url)).toContain('timeoutSeconds=30')
+    expect(String(url)).toContain('timeoutSeconds=25')
     expect(result).toEqual({
       result: { kind: 'up', statusText: 'ok' },
       cursor: 'v2',

@@ -1,0 +1,45 @@
+.app-shell {
+  width: min(40rem, 100%);
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+.app-shell h1 {
+  margin: 0 0 1rem;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.panel {
+  border: 1px solid #d5d7da;
+  border-radius: 0.5rem;
+  background: #fff;
+  padding: 1rem;
+}
+
+.status-line {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.status-value {
+  font-weight: 700;
+}
+
+.status-up {
+  color: #0a7a35;
+}
+
+.status-down {
+  color: #b42318;
+}
+
+.status-checking {
+  color: #344054;
+}
+
+.meta {
+  margin: 0.5rem 0 0;
+  color: #475467;
+  font-size: 0.875rem;
+}

@@ -6,7 +6,7 @@ server {
   index index.html;
 
   location /api/ {
-    proxy_pass ${BACKEND_ORIGIN};
+    proxy_pass ${BACKEND_ORIGIN}$request_uri;
     proxy_http_version 1.1;
     proxy_ssl_server_name on;
     proxy_read_timeout 65s;

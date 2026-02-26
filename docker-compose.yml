@@ -1,16 +1,6 @@
 services:
   frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "80:80"
-
-  frontend-dev:
     image: node:22-alpine
-    profiles: ["dev"]
     working_dir: /app
     command: sh -lc "npm ci && npm run dev"
     environment:
@@ -21,4 +11,15 @@ services:
       - ./:/app
       - /app/node_modules
     ports:
+      - "80:5173"
       - "5173:5173"
+
+  frontend-prod:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8081:80"

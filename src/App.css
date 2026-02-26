@@ -1,7 +1,14 @@
+.app-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
 .app-shell {
-  width: min(40rem, 100%);
+  width: min(72rem, 100%);
   margin: 0 auto;
   padding: 2rem 1rem;
+  flex: 1;
 }
 
 .app-shell h1 {
@@ -10,11 +17,233 @@
   font-weight: 700;
 }
 
+.app-layout {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+}
+
+.sidebar-menu {
+  display: grid;
+  gap: 1rem;
+  align-content: start;
+}
+
+.main-stage {
+  min-height: 12rem;
+}
+
+.section-title {
+  margin: 0 0 0.75rem;
+  font-size: 1.125rem;
+}
+
 .panel {
   border: 1px solid #d5d7da;
   border-radius: 0.5rem;
   background: #fff;
   padding: 1rem;
+}
+
+.app-footer {
+  border-top: 1px solid #d5d7da;
+  background: #fff;
+  padding: 0.75rem 1rem;
+}
+
+.app-footer .footer-banner {
+  width: min(72rem, 100%);
+  margin: 0 auto;
+}
+
+.footer-banner {
+  padding: 0.25rem 0;
+}
+
+.footer-banner .status-line {
+  font-size: 0.95rem;
+}
+
+.compact-meta {
+  margin-top: 0.25rem;
+}
+
+.auth-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.auth-block {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.field-label {
+  font-size: 0.875rem;
+  color: #344054;
+}
+
+.field-input {
+  width: 100%;
+  border: 1px solid #d0d5dd;
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: #fff;
+}
+
+.field-input:focus {
+  outline: 2px solid #98a2b3;
+  outline-offset: 1px;
+}
+
+.button {
+  width: fit-content;
+  border: 1px solid #101828;
+  border-radius: 0.5rem;
+  background: #101828;
+  color: #fff;
+  padding: 0.55rem 0.85rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.error-text {
+  margin: 0.75rem 0 0;
+  color: #b42318;
+  font-size: 0.875rem;
+}
+
+.lobby-grid {
+  display: grid;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.lobby-column {
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+}
+
+.lobby-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.button-secondary {
+  background: #fff;
+  color: #101828;
+}
+
+.button-danger {
+  border-color: #b42318;
+  background: #b42318;
+}
+
+.limits-box {
+  border: 1px solid #e4e7ec;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  background: #fcfcfd;
+}
+
+.game-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.game-card {
+  border: 1px solid #e4e7ec;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  background: #fff;
+}
+
+.game-card.is-selected {
+  border-color: #98a2b3;
+  box-shadow: 0 0 0 2px rgba(152, 162, 179, 0.2);
+}
+
+.game-card-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.game-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  border: 1px solid #d0d5dd;
+}
+
+.pill-open {
+  color: #0a7a35;
+  border-color: #abefc6;
+  background: #ecfdf3;
+}
+
+.pill-closed {
+  color: #475467;
+  border-color: #d0d5dd;
+  background: #f9fafb;
+}
+
+.panel-inset {
+  border-color: #e4e7ec;
+}
+
+.details-grid {
+  margin: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.details-grid div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.details-grid dt {
+  font-size: 0.75rem;
+  color: #667085;
+}
+
+.details-grid dd {
+  margin: 0;
+  font-size: 0.9rem;
+  word-break: break-word;
+}
+
+@media (min-width: 800px) {
+  .app-layout {
+    grid-template-columns: 20rem minmax(0, 1fr);
+  }
+
+  .lobby-grid {
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  }
 }
 
 .status-line {

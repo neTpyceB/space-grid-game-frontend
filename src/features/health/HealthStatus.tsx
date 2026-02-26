@@ -28,7 +28,7 @@ function sleep(ms: number): Promise<void> {
   })
 }
 
-export function HealthStatus() {
+export function HealthStatus({ compact = false }: { compact?: boolean }) {
   const [state, setState] = useState<ViewState>({ phase: 'loading' })
 
   useEffect(() => {
@@ -161,7 +161,7 @@ export function HealthStatus() {
 
   if (state.phase === 'loading') {
     return (
-      <section className="panel" aria-live="polite">
+      <section className={compact ? 'footer-banner' : 'panel'} aria-live="polite">
         <p className="status-line">
           Server status is <span className="status-value status-checking">CHECKING...</span>
         </p>
@@ -173,7 +173,7 @@ export function HealthStatus() {
   const checkedTime = checkedAt.toLocaleTimeString()
 
   return (
-    <section className="panel" aria-live="polite">
+    <section className={compact ? 'footer-banner' : 'panel'} aria-live="polite">
       <p className="status-line">
         Server status is{' '}
         <span
@@ -184,17 +184,27 @@ export function HealthStatus() {
           {result.statusText}
         </span>
       </p>
-      <p className="meta">
-        Last update: {checkedTime}{' '}
-        {transportMode === 'long-poll'
-          ? '(long poll reconnects immediately after each response)'
-          : '(every 5 seconds)'}
-      </p>
-      <p className="meta">
-        Transport: {transportMode === 'long-poll' ? 'Long polling' : 'Polling fallback'}
-      </p>
-      <p className="meta">{note}</p>
-      {result.kind === 'down' ? <p className="meta">Reason: {result.error}</p> : null}
+      {compact ? (
+        <p className="meta compact-meta">
+          {transportMode === 'long-poll' ? 'Long polling' : 'Polling fallback'} • Last{' '}
+          {checkedTime}
+          {result.kind === 'down' ? ` • ${result.error}` : ''}
+        </p>
+      ) : (
+        <>
+          <p className="meta">
+            Last update: {checkedTime}{' '}
+            {transportMode === 'long-poll'
+              ? '(long poll reconnects immediately after each response)'
+              : '(every 5 seconds)'}
+          </p>
+          <p className="meta">
+            Transport: {transportMode === 'long-poll' ? 'Long polling' : 'Polling fallback'}
+          </p>
+          <p className="meta">{note}</p>
+          {result.kind === 'down' ? <p className="meta">Reason: {result.error}</p> : null}
+        </>
+      )}
     </section>
   )
 }

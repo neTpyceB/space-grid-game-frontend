@@ -1,0 +1,107 @@
+type AuthUser = {
+  id: number
+  email: string
+}
+
+type MeResponse = {
+  authenticated?: unknown
+  user?: unknown
+}
+
+type EmailAuthResponse = {
+  status?: unknown
+  authenticated?: unknown
+  created?: unknown
+  user?: unknown
+}
+
+export type AuthState =
+  | { kind: 'guest' }
+  | { kind: 'authed'; user: AuthUser; created?: boolean }
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
+
+function apiUrl(path: string): string {
+  return API_BASE_URL ? `${API_BASE_URL}${path}` : path
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function parseUser(value: unknown): AuthUser | null {
+  if (!isObject(value)) return null
+  if (typeof value.id !== 'number') return null
+  if (typeof value.email !== 'string' || value.email.trim() === '') return null
+
+  return { id: value.id, email: value.email }
+}
+
+export async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthState> {
+  const response = await fetch(apiUrl('/api/auth/me'), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+    },
+  })
+
+  if (response.status === 401) {
+    return { kind: 'guest' }
+  }
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`)
+  }
+
+  const data = (await response.json()) as MeResponse
+  const user = parseUser(data.user)
+  if (data.authenticated === true && user) {
+    return { kind: 'authed', user }
+  }
+
+  return { kind: 'guest' }
+}
+
+export async function authByEmail(email: string): Promise<AuthState> {
+  const response = await fetch(apiUrl('/api/auth/email'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ email }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`)
+  }
+
+  const data = (await response.json()) as EmailAuthResponse
+  const user = parseUser(data.user)
+  if (data.authenticated !== true || !user) {
+    throw new Error('Invalid auth response')
+  }
+
+  return {
+    kind: 'authed',
+    user,
+    created: data.created === true,
+  }
+}
+
+export async function logout(): Promise<void> {
+  const response = await fetch(apiUrl('/api/auth/logout'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json, */*',
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`)
+  }
+}

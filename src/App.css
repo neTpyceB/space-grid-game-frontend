@@ -138,6 +138,13 @@
   gap: 0.5rem;
 }
 
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: end;
+}
+
 .button-secondary {
   background: #fff;
   color: #101828;
@@ -168,6 +175,11 @@
   border-radius: 0.5rem;
   padding: 0.75rem;
   background: #fff;
+}
+
+.compact-card {
+  display: grid;
+  gap: 0.5rem;
 }
 
 .game-card.is-selected {
@@ -214,6 +226,11 @@
   border-color: #e4e7ec;
 }
 
+.join-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
 .details-grid {
   margin: 0;
   display: grid;
@@ -236,6 +253,29 @@
   word-break: break-word;
 }
 
+.simple-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.simple-list li {
+  border: 1px solid #eaecf0;
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  background: #fff;
+}
+
+.inline-meta {
+  margin: 0;
+}
+
+.token-line {
+  word-break: break-all;
+}
+
 @media (min-width: 800px) {
   .app-layout {
     grid-template-columns: 20rem minmax(0, 1fr);
@@ -243,6 +283,10 @@
 
   .lobby-grid {
     grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  }
+
+  .join-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

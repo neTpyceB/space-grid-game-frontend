@@ -1,6 +1,8 @@
 server {
   listen ${PORT};
   server_name _;
+  resolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;
+  resolver_timeout 5s;
 
   root /usr/share/nginx/html;
   index index.html;

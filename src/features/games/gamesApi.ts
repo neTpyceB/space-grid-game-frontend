@@ -1,5 +1,6 @@
 export type GameStatus = 'open' | 'closed'
-export type GameCloseReason = 'give_up' | 'timeout' | null
+export type GameVisibility = 'private' | 'public'
+export type GameCloseReason = 'give_up' | 'timeout' | 'last_standing' | null
 
 export type Game = {
   id: number
@@ -8,8 +9,12 @@ export type Game = {
   closeReason: GameCloseReason
   pointsAtStake: number
   winnerUserId: number | null
+  visibility: GameVisibility
   maxPlayers: number
-  playersCount: number | null
+  playersCount: number
+  fieldWidth: number
+  fieldHeight: number
+  randomSize: boolean
   createdAt: string
   updatedAt: string
   lastMoveAt: string | null
@@ -27,6 +32,7 @@ export type Limits = {
   canJoinGame: boolean
   moveTimeoutSeconds: number
   maxPlayersPerCreatedGameLimit: number
+  tierLevel: number
 }
 
 export type GamePlayer = {
@@ -34,6 +40,8 @@ export type GamePlayer = {
   userId: number
   email: string
   joinedAt: string
+  status: 'active' | 'gave_up'
+  gaveUpAt: string | null
 }
 
 export type GameInvitation = {
@@ -46,42 +54,36 @@ export type GameInvitation = {
   frontendInvitePath: string
 }
 
+export type GameEvent = {
+  id: number
+  type: string
+  actorUserId: number | null
+  payload: Record<string, unknown>
+  createdAt: string
+}
+
 export type GameDetails = {
   game: Game
   players: GamePlayer[]
   invitations: GameInvitation[]
+  events: GameEvent[]
 }
 
-type GamesListResponse = {
-  games?: unknown
-  limits?: unknown
+export type CreateGameInput = {
+  visibility: GameVisibility
+  maxPlayers: number
+  fieldWidth: number
+  fieldHeight: number
+  randomSize: boolean
 }
 
-type GameWithLimitsResponse = {
-  game?: unknown
-  limits?: unknown
-}
-
-type GameShowResponse = {
-  game?: unknown
-  players?: unknown
-  invitations?: unknown
-}
-
-type GameJoinResponse = {
-  game?: unknown
-  players?: unknown
-  limits?: unknown
-}
-
-type InvitationCreateResponse = {
-  invitation?: unknown
-}
-
-type ErrorResponse = {
-  message?: unknown
-  limits?: unknown
-}
+type GamesListResponse = { games?: unknown; limits?: unknown }
+type GameWithLimitsResponse = { game?: unknown; limits?: unknown }
+type GameShowResponse = { game?: unknown; players?: unknown; invitations?: unknown; events?: unknown }
+type GameJoinResponse = { game?: unknown; players?: unknown; limits?: unknown }
+type InvitationCreateResponse = { invitation?: unknown }
+type PendingInvitationsResponse = { invitations?: unknown }
+type ErrorResponse = { message?: unknown; limits?: unknown }
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
 
@@ -95,7 +97,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function asInt(value: unknown, label: string): number {
   const n = Number(value)
-  if (!Number.isFinite(n) || !Number.isInteger(n)) throw new Error(`Invalid ${label}`)
+  if (!Number.isInteger(n)) throw new Error(`Invalid ${label}`)
   return n
 }
 
@@ -108,10 +110,18 @@ function parseGame(value: unknown): Game {
   if (!isObject(value)) throw new Error('Invalid game payload')
 
   const status = value.status
+  const visibility = value.visibility
   const closeReason = value.closeReason
-  if (status !== 'open' && status !== 'closed') throw new Error('Invalid game status')
-  if (closeReason !== 'give_up' && closeReason !== 'timeout' && closeReason !== null) {
-    throw new Error('Invalid game close reason')
+
+  if (status !== 'open' && status !== 'closed') throw new Error('Invalid game.status')
+  if (visibility !== 'private' && visibility !== 'public') throw new Error('Invalid game.visibility')
+  if (
+    closeReason !== 'give_up' &&
+    closeReason !== 'timeout' &&
+    closeReason !== 'last_standing' &&
+    closeReason !== null
+  ) {
+    throw new Error('Invalid game.closeReason')
   }
 
   return {
@@ -121,8 +131,12 @@ function parseGame(value: unknown): Game {
     closeReason,
     pointsAtStake: Number(value.pointsAtStake ?? 0),
     winnerUserId: value.winnerUserId === null ? null : asInt(value.winnerUserId, 'game.winnerUserId'),
+    visibility,
     maxPlayers: asInt(value.maxPlayers, 'game.maxPlayers'),
-    playersCount: value.playersCount === null ? null : asInt(value.playersCount, 'game.playersCount'),
+    playersCount: asInt(value.playersCount, 'game.playersCount'),
+    fieldWidth: asInt(value.fieldWidth, 'game.fieldWidth'),
+    fieldHeight: asInt(value.fieldHeight, 'game.fieldHeight'),
+    randomSize: value.randomSize === true,
     createdAt: asString(value.createdAt, 'game.createdAt'),
     updatedAt: asString(value.updatedAt, 'game.updatedAt'),
     lastMoveAt: value.lastMoveAt === null ? null : asString(value.lastMoveAt, 'game.lastMoveAt'),
@@ -146,6 +160,7 @@ function parseLimits(value: unknown): Limits {
       value.maxPlayersPerCreatedGameLimit,
       'limits.maxPlayersPerCreatedGameLimit',
     ),
+    tierLevel: asInt(value.tierLevel, 'limits.tierLevel'),
   }
 }
 
@@ -153,11 +168,15 @@ function parsePlayers(value: unknown): GamePlayer[] {
   if (!Array.isArray(value)) return []
   return value.map((row) => {
     if (!isObject(row)) throw new Error('Invalid player payload')
+    const status = row.status
+    if (status !== 'active' && status !== 'gave_up') throw new Error('Invalid player.status')
     return {
       id: asInt(row.id, 'player.id'),
       userId: asInt(row.userId, 'player.userId'),
       email: asString(row.email, 'player.email'),
       joinedAt: asString(row.joinedAt, 'player.joinedAt'),
+      status,
+      gaveUpAt: row.gaveUpAt === null ? null : asString(row.gaveUpAt, 'player.gaveUpAt'),
     }
   })
 }
@@ -171,10 +190,23 @@ function parseInvitations(value: unknown): GameInvitation[] {
       email: asString(row.email, 'invitation.email'),
       token: asString(row.token, 'invitation.token'),
       createdAt: asString(row.createdAt, 'invitation.createdAt'),
-      acceptedAt:
-        row.acceptedAt === null ? null : asString(row.acceptedAt, 'invitation.acceptedAt'),
+      acceptedAt: row.acceptedAt === null ? null : asString(row.acceptedAt, 'invitation.acceptedAt'),
       joinApiPath: asString(row.joinApiPath, 'invitation.joinApiPath'),
       frontendInvitePath: asString(row.frontendInvitePath, 'invitation.frontendInvitePath'),
+    }
+  })
+}
+
+function parseEvents(value: unknown): GameEvent[] {
+  if (!Array.isArray(value)) return []
+  return value.map((row) => {
+    if (!isObject(row)) throw new Error('Invalid event payload')
+    return {
+      id: asInt(row.id, 'event.id'),
+      type: asString(row.type, 'event.type'),
+      actorUserId: row.actorUserId === null ? null : asInt(row.actorUserId, 'event.actorUserId'),
+      payload: isObject(row.payload) ? row.payload : {},
+      createdAt: asString(row.createdAt, 'event.createdAt'),
     }
   })
 }
@@ -187,10 +219,10 @@ async function readErrorMessage(response: Response, fallback: string): Promise<s
   try {
     const data = (await readJson(response)) as ErrorResponse
     if (typeof data.message === 'string' && data.message.trim() !== '') return data.message
-    return fallback
   } catch {
-    return fallback
+    // ignore parse error
   }
+  return fallback
 }
 
 export class OpenGamesLimitReachedError extends Error {
@@ -202,10 +234,14 @@ export class OpenGamesLimitReachedError extends Error {
   }
 }
 
-export async function listPlayableGames(signal?: AbortSignal): Promise<{
-  games: Game[]
-  limits: Limits
-}> {
+async function parseGamesListResponse(response: Response): Promise<{ games: Game[]; limits: Limits }> {
+  const data = (await readJson(response)) as GamesListResponse
+  const games = Array.isArray(data.games) ? data.games.map(parseGame) : []
+  const limits = parseLimits(data.limits)
+  return { games, limits }
+}
+
+export async function listPlayableGames(signal?: AbortSignal): Promise<{ games: Game[]; limits: Limits }> {
   const response = await fetch(apiUrl('/api/games'), {
     method: 'GET',
     signal,
@@ -214,13 +250,10 @@ export async function listPlayableGames(signal?: AbortSignal): Promise<{
   })
   if (response.status === 401) throw new Error('Authentication required')
   if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
-  const data = (await readJson(response)) as GamesListResponse
-  const games = Array.isArray(data.games) ? data.games.map(parseGame) : []
-  const limits = parseLimits(data.limits)
-  return { games, limits }
+  return parseGamesListResponse(response)
 }
 
-export async function listCreatedGames(signal?: AbortSignal): Promise<Game[]> {
+export async function listCreatedGames(signal?: AbortSignal): Promise<{ games: Game[]; limits: Limits }> {
   const response = await fetch(apiUrl('/api/games/created'), {
     method: 'GET',
     signal,
@@ -229,40 +262,65 @@ export async function listCreatedGames(signal?: AbortSignal): Promise<Game[]> {
   })
   if (response.status === 401) throw new Error('Authentication required')
   if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
-  const data = (await readJson(response)) as GamesListResponse
-  return Array.isArray(data.games) ? data.games.map(parseGame) : []
+  return parseGamesListResponse(response)
 }
 
-export async function createGame(maxPlayers?: number): Promise<{ game: Game; limits: Limits }> {
-  const init: RequestInit = {
-    method: 'POST',
+export async function listPublicGames(signal?: AbortSignal): Promise<{ games: Game[]; limits: Limits }> {
+  const response = await fetch(apiUrl('/api/games/public'), {
+    method: 'GET',
+    signal,
     credentials: 'include',
     headers: { Accept: 'application/json' },
-  }
-  if (typeof maxPlayers === 'number') {
-    init.headers = { ...init.headers, 'Content-Type': 'application/json' }
-    init.body = JSON.stringify({ maxPlayers })
-  }
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  return parseGamesListResponse(response)
+}
 
-  const response = await fetch(apiUrl('/api/games'), init)
+export async function listPendingInvitations(signal?: AbortSignal): Promise<GameInvitation[]> {
+  const response = await fetch(apiUrl('/api/invitations'), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  const data = (await readJson(response)) as PendingInvitationsResponse
+  return parseInvitations(data.invitations)
+}
+
+export async function createGame(input: CreateGameInput): Promise<{ game: Game; limits: Limits }> {
+  const response = await fetch(apiUrl('/api/games'), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  })
+
   if (response.status === 401) throw new Error('Authentication required')
   if (response.status === 409) {
-    const data = (await readJson(response)) as ErrorResponse
     let limits: Limits | null = null
+    let message = 'Open games limit reached'
     try {
-      limits = parseLimits(data.limits)
+      const data = (await readJson(response)) as ErrorResponse
+      if (typeof data.message === 'string' && data.message) message = data.message
+      limits = data.limits ? parseLimits(data.limits) : null
     } catch {
-      limits = null
+      // ignore parse failures
     }
-    throw new OpenGamesLimitReachedError(
-      typeof data.message === 'string' ? data.message : 'Open games limit reached',
-      limits,
-    )
+    throw new OpenGamesLimitReachedError(message, limits)
   }
   if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
 
   const data = (await readJson(response)) as GameWithLimitsResponse
-  return { game: parseGame(data.game), limits: parseLimits(data.limits) }
+  return {
+    game: parseGame(data.game),
+    limits: parseLimits(data.limits),
+  }
 }
 
 export async function getGameDetails(id: number, signal?: AbortSignal): Promise<GameDetails> {
@@ -280,11 +338,12 @@ export async function getGameDetails(id: number, signal?: AbortSignal): Promise<
     game: parseGame(data.game),
     players: parsePlayers(data.players),
     invitations: parseInvitations(data.invitations),
+    events: parseEvents(data.events),
   }
 }
 
-export async function closeGame(id: number): Promise<{ game: Game; limits: Limits }> {
-  const response = await fetch(apiUrl(`/api/games/${id}/close`), {
+export async function giveUpGame(id: number): Promise<{ game: Game; limits: Limits }> {
+  const response = await fetch(apiUrl(`/api/games/${id}/give-up`), {
     method: 'POST',
     credentials: 'include',
     headers: { Accept: 'application/json' },
@@ -293,21 +352,25 @@ export async function closeGame(id: number): Promise<{ game: Game; limits: Limit
   if (response.status === 404) throw new Error('Game not found')
   if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
   const data = (await readJson(response)) as GameWithLimitsResponse
-  return { game: parseGame(data.game), limits: parseLimits(data.limits) }
+  return {
+    game: parseGame(data.game),
+    limits: parseLimits(data.limits),
+  }
 }
 
-export async function joinGameByToken(
+export async function joinGame(
   id: number,
-  token: string,
+  token?: string,
 ): Promise<{ game: Game; players: GamePlayer[]; limits: Limits }> {
+  const hasToken = typeof token === 'string' && token.trim() !== ''
   const response = await fetch(apiUrl(`/api/games/${id}/join`), {
     method: 'POST',
     credentials: 'include',
     headers: {
       Accept: 'application/json',
-      'Content-Type': 'application/json',
+      ...(hasToken ? { 'Content-Type': 'application/json' } : {}),
     },
-    body: JSON.stringify({ token }),
+    ...(hasToken ? { body: JSON.stringify({ token: token.trim() }) } : {}),
   })
   if (response.status === 401) throw new Error('Authentication required')
   if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
@@ -319,11 +382,8 @@ export async function joinGameByToken(
   }
 }
 
-export async function createInvitation(
-  id: number,
-  email: string,
-): Promise<GameInvitation> {
-  const response = await fetch(apiUrl(`/api/games/${id}/invitations`), {
+export async function createInvitation(gameId: number, email: string): Promise<GameInvitation> {
+  const response = await fetch(apiUrl(`/api/games/${gameId}/invitations`), {
     method: 'POST',
     credentials: 'include',
     headers: {
@@ -335,5 +395,7 @@ export async function createInvitation(
   if (response.status === 401) throw new Error('Authentication required')
   if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
   const data = (await readJson(response)) as InvitationCreateResponse
-  return parseInvitations([data.invitation])[0]
+  const parsed = parseInvitations([data.invitation])
+  if (!parsed[0]) throw new Error('Invalid invitation response')
+  return parsed[0]
 }

@@ -197,6 +197,7 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
 
     const controller = new AbortController()
     let active = true
+    let retryTimerId: number | null = null
 
     const load = async () => {
       setViewState((prev) =>
@@ -230,6 +231,10 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
           phase: 'error',
           message: error instanceof Error ? error.message : 'Failed to load lobby',
         })
+        retryTimerId = window.setTimeout(() => {
+          if (!active) return
+          setRefreshNonce((v) => v + 1)
+        }, 2000)
       }
     }
 
@@ -237,6 +242,9 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
     return () => {
       active = false
       controller.abort()
+      if (retryTimerId !== null) {
+        window.clearTimeout(retryTimerId)
+      }
     }
   }, [authState, refreshNonce])
 

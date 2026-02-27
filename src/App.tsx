@@ -15,6 +15,8 @@ import {
 } from './features/games/gamesApi'
 import { PhoenixGameSocket } from './net/ws'
 import { HealthStatus } from './features/health/HealthStatus'
+import { RealtimeTransportStatus } from './features/realtime/realtimeStatus'
+import { publishRealtimeStatus } from './features/realtime/realtimeBus'
 import { usePageTitle } from './app/usePageTitle'
 import './App.css'
 
@@ -267,6 +269,20 @@ function parseRealtimePayload(payload: unknown): RealtimeGamePayload | null {
   return { game, state, players }
 }
 
+function resolveWsBaseUrl(): string {
+  const envUrl = String(import.meta.env.VITE_WS_BASE_URL ?? '').trim()
+  if (envUrl) return envUrl
+
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname.toLowerCase()
+    if (host === 'localhost' || host === '127.0.0.1') {
+      return 'ws://localhost:4000/socket/websocket'
+    }
+  }
+
+  return 'wss://api.gridgame.online/socket/websocket'
+}
+
 function validateMoveTarget(
   target: Coord,
   state: GameState | null,
@@ -325,6 +341,7 @@ function GameBoardPage({ authState }: PageProps) {
   const gameStateCursorRef = useRef<string | null>(null)
   const wsClientRef = useRef<PhoenixGameSocket | null>(null)
   const [wsConnected, setWsConnected] = useState(false)
+  const [wsTransportState, setWsTransportState] = useState<'idle' | 'connecting' | 'connected' | 'disconnected'>('idle')
   const liveGameRef = useRef<Game | null>(null)
   const livePlayersRef = useRef<GamePlayer[] | null>(null)
   const gameStateRef = useRef<GameState | null>(null)
@@ -377,13 +394,11 @@ function GameBoardPage({ authState }: PageProps) {
 
     const connectWs = async () => {
       try {
+        setWsTransportState('connecting')
         const token = await fetchRealtimeToken(controller.signal)
         if (!active) return
 
-        const baseUrl =
-          import.meta.env.VITE_WS_BASE_URL ??
-          'wss://api.gridgame.online/socket/websocket'
-        const url = new URL(baseUrl)
+        const url = new URL(resolveWsBaseUrl())
         url.searchParams.set('vsn', '2.0.0')
         url.searchParams.set('token', token)
 
@@ -392,6 +407,16 @@ function GameBoardPage({ authState }: PageProps) {
           topic: `game:${numericId}`,
           onStatusChange: (status) => {
             setWsConnected(status === 'connected')
+            if (status === 'connecting') {
+              setWsTransportState('connecting')
+              publishRealtimeStatus('ws-connecting')
+            } else if (status === 'connected') {
+              setWsTransportState('connected')
+              publishRealtimeStatus('ws-connected')
+            } else {
+              setWsTransportState('disconnected')
+              publishRealtimeStatus('polling-fallback', 'WebSocket disconnected, using long poll.')
+            }
           },
           onEvent: (event, payload) => {
             if (event === 'state_snapshot' || event === 'state_updated') {
@@ -473,6 +498,8 @@ function GameBoardPage({ authState }: PageProps) {
         client.connect()
       } catch {
         setWsConnected(false)
+        setWsTransportState('disconnected')
+        publishRealtimeStatus('polling-fallback', 'WebSocket unavailable, using long poll.')
       }
     }
 
@@ -486,11 +513,13 @@ function GameBoardPage({ authState }: PageProps) {
       }
       wsClientRef.current = null
       setWsConnected(false)
+      setWsTransportState('idle')
+      publishRealtimeStatus('idle')
     }
   }, [authState, gameId])
 
   useEffect(() => {
-    if (wsConnected) return
+    if (wsConnected || wsTransportState !== 'disconnected') return
     if (authState?.kind !== 'authed') return
     const numericId = Number(gameId)
     if (!Number.isInteger(numericId) || numericId < 1) return
@@ -498,6 +527,7 @@ function GameBoardPage({ authState }: PageProps) {
     let active = true
     let firstResponsePending = lastSnapshotKeyRef.current === null
     setLoadingState(firstResponsePending)
+    publishRealtimeStatus('polling-fallback', 'Listening for board updates over long poll.')
 
     const delay = (ms: number) =>
       new Promise<void>((resolve) => {
@@ -558,7 +588,7 @@ function GameBoardPage({ authState }: PageProps) {
       active = false
       controller.abort()
     }
-  }, [authState, gameId, pollNonce, wsConnected])
+  }, [authState, gameId, pollNonce, wsConnected, wsTransportState])
 
   useEffect(() => {
     setSelectedCell(null)
@@ -1153,6 +1183,9 @@ function AppLayout() {
 
           <div className="footer-status">
             <HealthStatus compact />
+          </div>
+          <div className="footer-status">
+            <RealtimeTransportStatus compact />
           </div>
         </div>
       </footer>

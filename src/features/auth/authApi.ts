@@ -214,7 +214,11 @@ export async function fetchRealtimeToken(signal?: AbortSignal): Promise<string> 
   }
 
   const data = (await response.json()) as RealtimeTokenResponse
-  if (data.status !== 'ok' || typeof data.token !== 'string' || data.token.trim() === '') {
+  if (
+    (data.status !== undefined && data.status !== 'ok') ||
+    typeof data.token !== 'string' ||
+    data.token.trim() === ''
+  ) {
     throw new Error('Invalid realtime token response')
   }
 

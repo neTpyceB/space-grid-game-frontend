@@ -1,3 +1,5 @@
+import { apiUrl } from '../../net/apiBase'
+
 export type GameStatus = 'open' | 'closed'
 export type GameVisibility = 'private' | 'public'
 export type GameCloseReason = 'give_up' | 'timeout' | 'last_standing' | null
@@ -120,12 +122,6 @@ type PendingInvitationsResponse = { invitations?: unknown }
 type InvitationRejectResponse = { rejectedInvitationId?: unknown }
 type ErrorResponse = { message?: unknown; limits?: unknown }
 type LongPollMetaResponse = { cursor?: unknown; timeout?: unknown }
-
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
-
-function apiUrl(path: string): string {
-  return API_BASE_URL ? `${API_BASE_URL}${path}` : path
-}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null

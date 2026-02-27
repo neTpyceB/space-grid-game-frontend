@@ -1,4 +1,5 @@
 import type { AuthUser } from '../auth/authApi'
+import { apiUrl } from '../../net/apiBase'
 
 type SyncUserRaw = {
   id?: unknown
@@ -91,12 +92,6 @@ export type SyncLongPollCycle = {
   currentGame: SyncCurrentGame | null
   cursor: string | null
   timedOut: boolean
-}
-
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
-
-function apiUrl(path: string): string {
-  return API_BASE_URL ? `${API_BASE_URL}${path}` : path
 }
 
 function asInt(value: unknown, label: string): number {

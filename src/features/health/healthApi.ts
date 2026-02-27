@@ -1,3 +1,5 @@
+import { apiUrl } from '../../net/apiBase'
+
 export type HealthCheckResult =
   | { kind: 'up'; statusText: string }
   | { kind: 'down'; statusText: string; error: string }
@@ -19,12 +21,6 @@ type HealthJson = {
   status?: unknown
   cursor?: unknown
   timeout?: unknown
-}
-
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
-
-function apiUrl(path: string): string {
-  return API_BASE_URL ? `${API_BASE_URL}${path}` : path
 }
 
 function getDownResult(error: unknown): HealthCheckResult {

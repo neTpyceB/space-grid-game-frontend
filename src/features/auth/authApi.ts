@@ -1,3 +1,5 @@
+import { apiUrl } from '../../net/apiBase'
+
 export type AuthUser = {
   id: number
   email: string
@@ -31,12 +33,6 @@ export type AuthLongPollCycle = {
   authState: AuthState
   cursor: string | null
   timedOut: boolean
-}
-
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
-
-function apiUrl(path: string): string {
-  return API_BASE_URL ? `${API_BASE_URL}${path}` : path
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

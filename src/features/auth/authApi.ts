@@ -25,6 +25,12 @@ type EmailAuthResponse = {
   user?: unknown
 }
 
+type RealtimeTokenResponse = {
+  status?: unknown
+  token?: unknown
+  expiresAt?: unknown
+}
+
 export type AuthState =
   | { kind: 'guest' }
   | { kind: 'authed'; user: AuthUser; created?: boolean }
@@ -191,4 +197,26 @@ export async function tierUpgrade(): Promise<AuthUser> {
   const user = parseUser(data.user)
   if (!user) throw new Error('Invalid tier upgrade response')
   return user
+}
+
+export async function fetchRealtimeToken(signal?: AbortSignal): Promise<string> {
+  const response = await fetch(apiUrl('/api/auth/realtime-token'), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`)
+  }
+
+  const data = (await response.json()) as RealtimeTokenResponse
+  if (data.status !== 'ok' || typeof data.token !== 'string' || data.token.trim() === '') {
+    throw new Error('Invalid realtime token response')
+  }
+
+  return data.token
 }

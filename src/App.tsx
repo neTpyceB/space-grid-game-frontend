@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, Route, Routes, useParams } from 'react-router-dom'
 import { GamesLobby } from './features/games/GamesLobby'
 import { AuthHeader } from './features/auth/AuthHeader'
-import { type AuthState } from './features/auth/authApi'
+import { fetchRealtimeToken, type AuthState } from './features/auth/authApi'
 import { useAuthSession } from './features/auth/useAuthSession'
 import {
   getGameDetails,
@@ -203,16 +203,6 @@ function isSameCoord(a: Coord | null, b: Coord | null): boolean {
   return a.x === b.x && a.y === b.y
 }
 
-function getSessionCookieValue(name: string): string | null {
-  const cookie = document.cookie
-    .split(';')
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(`${name}=`))
-  if (!cookie) return null
-  const value = cookie.slice(name.length + 1)
-  return value ? decodeURIComponent(value) : null
-}
-
 function parseRealtimePayload(payload: unknown): RealtimeGamePayload | null {
   if (!payload || typeof payload !== 'object') return null
   const p = payload as {
@@ -382,107 +372,119 @@ function GameBoardPage({ authState }: PageProps) {
     if (authState?.kind !== 'authed') return
     const numericId = Number(gameId)
     if (!Number.isInteger(numericId) || numericId < 1) return
-    const sessionId = getSessionCookieValue('PHPSESSID')
-    if (!sessionId) {
-      setWsConnected(false)
-      return
-    }
+    const controller = new AbortController()
+    let active = true
 
-    const baseUrl =
-      import.meta.env.VITE_WS_BASE_URL ??
-      'wss://api.gridgame.online/socket/websocket'
-    const url = new URL(baseUrl)
-    url.searchParams.set('vsn', '2.0.0')
-    url.searchParams.set('session_id', sessionId)
+    const connectWs = async () => {
+      try {
+        const token = await fetchRealtimeToken(controller.signal)
+        if (!active) return
 
-    const client = new PhoenixGameSocket({
-      url: url.toString(),
-      topic: `game:${numericId}`,
-      onStatusChange: (status) => {
-        setWsConnected(status === 'connected')
-      },
-      onEvent: (event, payload) => {
-        if (event === 'state_snapshot' || event === 'state_updated') {
-          const parsed = parseRealtimePayload(payload)
-          const baseGame = liveGameRef.current ?? detailsRef.current?.game ?? null
-          if (!parsed || !baseGame) return
-          const nextGame: Game = {
-            ...baseGame,
-            ...parsed.game,
-          }
-          const nextPlayers: GamePlayer[] =
-            parsed.players.length > 0
-              ? parsed.players.map((player) => {
-                  const fallback =
-                    livePlayersRef.current?.find((p) => p.userId === player.userId) ??
-                    detailsRef.current?.players.find((p) => p.userId === player.userId)
-                  return {
-                    id: fallback?.id ?? player.userId,
-                    userId: player.userId,
-                    email: player.email,
-                    joinedAt: fallback?.joinedAt ?? '',
-                    status: player.status,
-                    gaveUpAt: fallback?.gaveUpAt ?? null,
-                    positionX: player.positionX,
-                    positionY: player.positionY,
-                    capturedCellsCount: player.capturedCellsCount,
-                    gameScore: player.gameScore,
-                  }
-                })
-              : livePlayersRef.current ?? detailsRef.current?.players ?? []
-          const nextState = parsed.state ?? gameStateRef.current ?? detailsRef.current?.state ?? null
-          const nextKey = buildStateSnapshotKey(nextGame, nextState, nextPlayers)
-          if (nextKey !== lastSnapshotKeyRef.current) {
-            lastSnapshotKeyRef.current = nextKey
-            setLiveGame(nextGame)
-            setGameState(nextState)
-            setLivePlayers(nextPlayers)
-            setDetails((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    game: nextGame,
-                    state: nextState,
-                    players: nextPlayers,
-                  }
-                : prev,
-            )
-          }
-          setMoveBusy(false)
-          return
-        }
+        const baseUrl =
+          import.meta.env.VITE_WS_BASE_URL ??
+          'wss://api.gridgame.online/socket/websocket'
+        const url = new URL(baseUrl)
+        url.searchParams.set('vsn', '2.0.0')
+        url.searchParams.set('token', token)
 
-        if (event === 'move_applied') {
-          setMoveBusy(false)
-          if (payload && typeof payload === 'object') {
-            const p = payload as { income?: unknown; captured?: unknown }
-            const income = Number.isFinite(Number(p.income)) ? Number(p.income) : null
-            const captured = p.captured === true
-            if (income !== null) {
-              setMoveNotice(`Action applied${captured ? ' • captured' : ''} • income +${income}`)
+        const client = new PhoenixGameSocket({
+          url: url.toString(),
+          topic: `game:${numericId}`,
+          onStatusChange: (status) => {
+            setWsConnected(status === 'connected')
+          },
+          onEvent: (event, payload) => {
+            if (event === 'state_snapshot' || event === 'state_updated') {
+              const parsed = parseRealtimePayload(payload)
+              const baseGame = liveGameRef.current ?? detailsRef.current?.game ?? null
+              if (!parsed || !baseGame) return
+              const nextGame: Game = {
+                ...baseGame,
+                ...parsed.game,
+              }
+              const nextPlayers: GamePlayer[] =
+                parsed.players.length > 0
+                  ? parsed.players.map((player) => {
+                      const fallback =
+                        livePlayersRef.current?.find((p) => p.userId === player.userId) ??
+                        detailsRef.current?.players.find((p) => p.userId === player.userId)
+                      return {
+                        id: fallback?.id ?? player.userId,
+                        userId: player.userId,
+                        email: player.email,
+                        joinedAt: fallback?.joinedAt ?? '',
+                        status: player.status,
+                        gaveUpAt: fallback?.gaveUpAt ?? null,
+                        positionX: player.positionX,
+                        positionY: player.positionY,
+                        capturedCellsCount: player.capturedCellsCount,
+                        gameScore: player.gameScore,
+                      }
+                    })
+                  : livePlayersRef.current ?? detailsRef.current?.players ?? []
+              const nextState = parsed.state ?? gameStateRef.current ?? detailsRef.current?.state ?? null
+              const nextKey = buildStateSnapshotKey(nextGame, nextState, nextPlayers)
+              if (nextKey !== lastSnapshotKeyRef.current) {
+                lastSnapshotKeyRef.current = nextKey
+                setLiveGame(nextGame)
+                setGameState(nextState)
+                setLivePlayers(nextPlayers)
+                setDetails((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        game: nextGame,
+                        state: nextState,
+                        players: nextPlayers,
+                      }
+                    : prev,
+                )
+              }
+              setMoveBusy(false)
               return
             }
-          }
-          setMoveNotice('Action applied.')
-          return
-        }
 
-        if (event === 'error') {
-          const msg =
-            payload && typeof payload === 'object' && 'message' in payload
-              ? String((payload as { message?: unknown }).message ?? 'WebSocket error')
-              : 'WebSocket error'
-          setMoveError(msg)
-        }
-      },
-    })
+            if (event === 'move_applied') {
+              setMoveBusy(false)
+              if (payload && typeof payload === 'object') {
+                const p = payload as { income?: unknown; captured?: unknown }
+                const income = Number.isFinite(Number(p.income)) ? Number(p.income) : null
+                const captured = p.captured === true
+                if (income !== null) {
+                  setMoveNotice(`Action applied${captured ? ' • captured' : ''} • income +${income}`)
+                  return
+                }
+              }
+              setMoveNotice('Action applied.')
+              return
+            }
 
-    wsClientRef.current = client
-    client.connect()
+            if (event === 'error') {
+              const msg =
+                payload && typeof payload === 'object' && 'message' in payload
+                  ? String((payload as { message?: unknown }).message ?? 'WebSocket error')
+                  : 'WebSocket error'
+              setMoveError(msg)
+            }
+          },
+        })
+
+        wsClientRef.current = client
+        client.connect()
+      } catch {
+        setWsConnected(false)
+      }
+    }
+
+    void connectWs()
 
     return () => {
+      active = false
+      controller.abort()
+      if (wsClientRef.current) {
+        wsClientRef.current.disconnect()
+      }
       wsClientRef.current = null
-      client.disconnect()
       setWsConnected(false)
     }
   }, [authState, gameId])

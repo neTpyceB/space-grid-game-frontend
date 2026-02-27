@@ -6,13 +6,14 @@ import { type AuthState } from './features/auth/authApi'
 import { useAuthSession } from './features/auth/useAuthSession'
 import {
   getGameDetails,
+  getGameStateLongPoll,
   moveGame,
   type Game,
   type GameDetails,
   type GamePlayer,
   type GameState,
 } from './features/games/gamesApi'
-import { fetchSyncLongPoll } from './features/sync/syncApi'
+import { PhoenixGameSocket } from './net/ws'
 import { HealthStatus } from './features/health/HealthStatus'
 import { usePageTitle } from './app/usePageTitle'
 import './App.css'
@@ -134,7 +135,23 @@ function GamesPage({ authState }: PageProps) {
 }
 
 type Coord = { x: number; y: number }
-type MoveValidation = { ok: true } | { ok: false; reason: string }
+type GameAction = 'move' | 'buy'
+type MoveValidation =
+  | { ok: true; action: GameAction }
+  | { ok: false; reason: string }
+type RealtimeGamePayload = {
+  game: Partial<Game>
+  state: GameState | null
+  players: Array<{
+    userId: number
+    email: string
+    status: 'active' | 'gave_up'
+    positionX: number | null
+    positionY: number | null
+    capturedCellsCount: number
+    gameScore: number
+  }>
+}
 
 const PLAYER_COLORS = ['#0ea5e9', '#ef4444', '#22c55e', '#f59e0b', '#8b5cf6', '#14b8a6']
 
@@ -186,21 +203,78 @@ function isSameCoord(a: Coord | null, b: Coord | null): boolean {
   return a.x === b.x && a.y === b.y
 }
 
-function mapSyncStateToGameState(currentGame: {
-  state: { width: number; height: number; cells: number[][] } | null
-  currentTurnUserId: number | null
-  turnNumber: number
-  playState: 'lobby' | 'active' | 'closed'
-}): GameState | null {
-  if (!currentGame.state) return null
-  return {
-    width: currentGame.state.width,
-    height: currentGame.state.height,
-    cells: currentGame.state.cells,
-    currentTurnUserId: currentGame.currentTurnUserId,
-    turnNumber: currentGame.turnNumber,
-    playState: currentGame.playState,
+function getSessionCookieValue(name: string): string | null {
+  const cookie = document.cookie
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`))
+  if (!cookie) return null
+  const value = cookie.slice(name.length + 1)
+  return value ? decodeURIComponent(value) : null
+}
+
+function parseRealtimePayload(payload: unknown): RealtimeGamePayload | null {
+  if (!payload || typeof payload !== 'object') return null
+  const p = payload as {
+    game?: unknown
+    state?: unknown
+    players?: unknown
   }
+  if (!p.game || typeof p.game !== 'object') return null
+  const game = p.game as Partial<Game>
+
+  let state: GameState | null = null
+  if (p.state && typeof p.state === 'object') {
+    const s = p.state as {
+      width?: unknown
+      height?: unknown
+      cells?: unknown
+      currentTurnUserId?: unknown
+      turnNumber?: unknown
+      playState?: unknown
+    }
+    if (Array.isArray(s.cells)) {
+      state = {
+        width: Number(s.width ?? 0),
+        height: Number(s.height ?? 0),
+        cells: s.cells.map((row) => (Array.isArray(row) ? row.map((c) => Number(c)) : [])),
+        currentTurnUserId:
+          s.currentTurnUserId === null || s.currentTurnUserId === undefined
+            ? null
+            : Number(s.currentTurnUserId),
+        turnNumber: Number(s.turnNumber ?? 0),
+        playState: (s.playState as GameState['playState']) ?? 'lobby',
+      }
+    }
+  }
+
+  const playersRaw = Array.isArray(p.players) ? p.players : []
+  const players = playersRaw
+    .filter((row) => row && typeof row === 'object')
+    .map((row) => {
+      const pr = row as {
+        userId?: unknown
+        email?: unknown
+        status?: unknown
+        positionX?: unknown
+        positionY?: unknown
+        capturedCellsCount?: unknown
+        gameScore?: unknown
+      }
+      const parsedStatus: 'active' | 'gave_up' = pr.status === 'gave_up' ? 'gave_up' : 'active'
+      return {
+        userId: Number(pr.userId),
+        email: String(pr.email ?? ''),
+        status: parsedStatus,
+        positionX: pr.positionX === null || pr.positionX === undefined ? null : Number(pr.positionX),
+        positionY: pr.positionY === null || pr.positionY === undefined ? null : Number(pr.positionY),
+        capturedCellsCount: Number(pr.capturedCellsCount ?? 0),
+        gameScore: Number(pr.gameScore ?? 0),
+      }
+    })
+    .filter((player) => Number.isInteger(player.userId) && player.email !== '')
+
+  return { game, state, players }
 }
 
 function validateMoveTarget(
@@ -225,6 +299,7 @@ function validateMoveTarget(
   const dx = target.x - myPlayer.positionX
   const dy = target.y - myPlayer.positionY
   const distance = Math.abs(dx) + Math.abs(dy)
+  if (distance === 0) return { ok: true, action: 'buy' }
   if (distance !== 1) return { ok: false, reason: 'Move must be exactly 1 cell.' }
   if (Math.abs(dx) === 1 && Math.abs(dy) === 1) return { ok: false, reason: 'Diagonal moves are not allowed.' }
 
@@ -237,7 +312,7 @@ function validateMoveTarget(
   )
   if (occupied) return { ok: false, reason: 'Target cell is occupied by another active player.' }
 
-  return { ok: true }
+  return { ok: true, action: 'move' }
 }
 
 function GameBoardPage({ authState }: PageProps) {
@@ -258,15 +333,19 @@ function GameBoardPage({ authState }: PageProps) {
   const [pollNonce, setPollNonce] = useState(0)
   const lastSnapshotKeyRef = useRef<string | null>(null)
   const gameStateCursorRef = useRef<string | null>(null)
+  const wsClientRef = useRef<PhoenixGameSocket | null>(null)
+  const [wsConnected, setWsConnected] = useState(false)
   const liveGameRef = useRef<Game | null>(null)
   const livePlayersRef = useRef<GamePlayer[] | null>(null)
+  const gameStateRef = useRef<GameState | null>(null)
   const detailsRef = useRef<GameDetails | null>(null)
 
   useEffect(() => {
     liveGameRef.current = liveGame
     livePlayersRef.current = livePlayers
+    gameStateRef.current = gameState
     detailsRef.current = details
-  }, [liveGame, livePlayers, details])
+  }, [liveGame, livePlayers, gameState, details])
 
   useEffect(() => {
     if (authState?.kind !== 'authed') return
@@ -303,6 +382,116 @@ function GameBoardPage({ authState }: PageProps) {
     if (authState?.kind !== 'authed') return
     const numericId = Number(gameId)
     if (!Number.isInteger(numericId) || numericId < 1) return
+    const sessionId = getSessionCookieValue('PHPSESSID')
+    if (!sessionId) {
+      setWsConnected(false)
+      return
+    }
+
+    const baseUrl =
+      import.meta.env.VITE_WS_BASE_URL ??
+      'wss://api.gridgame.online/socket/websocket'
+    const url = new URL(baseUrl)
+    url.searchParams.set('vsn', '2.0.0')
+    url.searchParams.set('session_id', sessionId)
+
+    const client = new PhoenixGameSocket({
+      url: url.toString(),
+      topic: `game:${numericId}`,
+      onStatusChange: (status) => {
+        setWsConnected(status === 'connected')
+      },
+      onEvent: (event, payload) => {
+        if (event === 'state_snapshot' || event === 'state_updated') {
+          const parsed = parseRealtimePayload(payload)
+          const baseGame = liveGameRef.current ?? detailsRef.current?.game ?? null
+          if (!parsed || !baseGame) return
+          const nextGame: Game = {
+            ...baseGame,
+            ...parsed.game,
+          }
+          const nextPlayers: GamePlayer[] =
+            parsed.players.length > 0
+              ? parsed.players.map((player) => {
+                  const fallback =
+                    livePlayersRef.current?.find((p) => p.userId === player.userId) ??
+                    detailsRef.current?.players.find((p) => p.userId === player.userId)
+                  return {
+                    id: fallback?.id ?? player.userId,
+                    userId: player.userId,
+                    email: player.email,
+                    joinedAt: fallback?.joinedAt ?? '',
+                    status: player.status,
+                    gaveUpAt: fallback?.gaveUpAt ?? null,
+                    positionX: player.positionX,
+                    positionY: player.positionY,
+                    capturedCellsCount: player.capturedCellsCount,
+                    gameScore: player.gameScore,
+                  }
+                })
+              : livePlayersRef.current ?? detailsRef.current?.players ?? []
+          const nextState = parsed.state ?? gameStateRef.current ?? detailsRef.current?.state ?? null
+          const nextKey = buildStateSnapshotKey(nextGame, nextState, nextPlayers)
+          if (nextKey !== lastSnapshotKeyRef.current) {
+            lastSnapshotKeyRef.current = nextKey
+            setLiveGame(nextGame)
+            setGameState(nextState)
+            setLivePlayers(nextPlayers)
+            setDetails((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    game: nextGame,
+                    state: nextState,
+                    players: nextPlayers,
+                  }
+                : prev,
+            )
+          }
+          setMoveBusy(false)
+          return
+        }
+
+        if (event === 'move_applied') {
+          setMoveBusy(false)
+          if (payload && typeof payload === 'object') {
+            const p = payload as { income?: unknown; captured?: unknown }
+            const income = Number.isFinite(Number(p.income)) ? Number(p.income) : null
+            const captured = p.captured === true
+            if (income !== null) {
+              setMoveNotice(`Action applied${captured ? ' • captured' : ''} • income +${income}`)
+              return
+            }
+          }
+          setMoveNotice('Action applied.')
+          return
+        }
+
+        if (event === 'error') {
+          const msg =
+            payload && typeof payload === 'object' && 'message' in payload
+              ? String((payload as { message?: unknown }).message ?? 'WebSocket error')
+              : 'WebSocket error'
+          setMoveError(msg)
+        }
+      },
+    })
+
+    wsClientRef.current = client
+    client.connect()
+
+    return () => {
+      wsClientRef.current = null
+      client.disconnect()
+      setWsConnected(false)
+    }
+  }, [authState, gameId])
+
+  useEffect(() => {
+    if (wsConnected) return
+    if (authState?.kind !== 'authed') return
+    const numericId = Number(gameId)
+    if (!Number.isInteger(numericId) || numericId < 1) return
     const controller = new AbortController()
     let active = true
     let firstResponsePending = lastSnapshotKeyRef.current === null
@@ -316,41 +505,17 @@ function GameBoardPage({ authState }: PageProps) {
     const run = async () => {
       while (active && !controller.signal.aborted) {
         try {
-          const cycle = await fetchSyncLongPoll(gameStateCursorRef.current, numericId, controller.signal)
+          const cycle = await getGameStateLongPoll(
+            numericId,
+            gameStateCursorRef.current,
+            controller.signal,
+          )
           if (!active) return
           gameStateCursorRef.current = cycle.cursor ?? gameStateCursorRef.current
-          if (cycle.timedOut || !cycle.currentGame) continue
-
-          const currentGame = cycle.currentGame
-          const nextState = mapSyncStateToGameState(currentGame)
-          const nextPlayers: GamePlayer[] = currentGame.players.map((player) => {
-            const fallback =
-              livePlayersRef.current?.find((p) => p.userId === player.userId) ??
-              detailsRef.current?.players.find((p) => p.userId === player.userId)
-            return {
-              id: fallback?.id ?? player.userId,
-              userId: player.userId,
-              email: player.email,
-              joinedAt: fallback?.joinedAt ?? '',
-              status: player.status,
-              gaveUpAt: fallback?.gaveUpAt ?? null,
-              positionX: player.positionX,
-              positionY: player.positionY,
-              capturedCellsCount: player.capturedCellsCount,
-              gameScore: player.gameScore,
-            }
-          })
-          const baseGame = liveGameRef.current ?? detailsRef.current?.game ?? null
-          const nextGame: Game | null = baseGame
-            ? {
-                ...baseGame,
-                status: currentGame.status,
-                playState: currentGame.playState,
-                currentTurnUserId: currentGame.currentTurnUserId,
-                turnNumber: currentGame.turnNumber,
-              }
-            : null
-          if (!nextGame) continue
+          if (cycle.timedOut) continue
+          const nextGame = cycle.data.game
+          const nextState = cycle.data.state
+          const nextPlayers = cycle.data.players
           const nextKey = buildStateSnapshotKey(nextGame, nextState, nextPlayers)
           if (lastSnapshotKeyRef.current !== nextKey) {
             lastSnapshotKeyRef.current = nextKey
@@ -391,7 +556,7 @@ function GameBoardPage({ authState }: PageProps) {
       active = false
       controller.abort()
     }
-  }, [authState, gameId, pollNonce])
+  }, [authState, gameId, pollNonce, wsConnected])
 
   useEffect(() => {
     setSelectedCell(null)
@@ -399,6 +564,7 @@ function GameBoardPage({ authState }: PageProps) {
     setMoveNotice(null)
     gameStateCursorRef.current = null
     lastSnapshotKeyRef.current = null
+    wsClientRef.current?.requestState()
   }, [gameId])
 
   if (authState?.kind !== 'authed') {
@@ -488,10 +654,36 @@ function GameBoardPage({ authState }: PageProps) {
       setMoveError(validation.reason)
       return
     }
+
+    if (wsConnected && wsClientRef.current?.isConnected()) {
+      setMoveBusy(true)
+      setMoveError(null)
+      const sent = wsClientRef.current.sendMove(
+        target.x,
+        target.y,
+        validation.action === 'buy',
+      )
+      if (!sent) {
+        setMoveBusy(false)
+        setMoveError('Failed to send move over WebSocket')
+        return
+      }
+      setMoveNotice(
+        validation.action === 'buy'
+          ? `Buy request sent at (${target.x}, ${target.y})`
+          : `Move sent to (${target.x}, ${target.y})`,
+      )
+      return
+    }
+
     setMoveBusy(true)
     setMoveError(null)
     try {
-      const result = await moveGame(numericId, target)
+      const result = await moveGame(numericId, {
+        x: target.x,
+        y: target.y,
+        buyCell: validation.action === 'buy',
+      })
       setLiveGame(result.game)
       setGameState(result.state)
       setLivePlayers(result.players)
@@ -506,7 +698,7 @@ function GameBoardPage({ authState }: PageProps) {
           : prev,
       )
       setMoveNotice(
-        `Moved to (${result.move.to.x}, ${result.move.to.y}) • ${
+        `${validation.action === 'buy' ? 'Buy' : 'Move'} to (${result.move.to.x}, ${result.move.to.y}) • ${
           result.move.captured ? 'captured cell' : 'already yours'
         } • income +${result.move.income}`,
       )
@@ -550,7 +742,12 @@ function GameBoardPage({ authState }: PageProps) {
       {game && players.length > 0 ? (
         <>
           <div className="game-board-layout">
-            <section className="panel panel-inset game-board-panel" tabIndex={0}>
+            <section
+              className={`panel panel-inset game-board-panel${
+                state?.currentTurnUserId === myUserId && state.playState === 'active' ? ' is-your-turn' : ''
+              }`}
+              tabIndex={0}
+            >
               <div className="game-board-toolbar">
                 <div className="turn-badge">
                   {state?.playState === 'active'
@@ -625,6 +822,7 @@ function GameBoardPage({ authState }: PageProps) {
                   const isSelected = selectedCell?.x === x && selectedCell?.y === y
                   const isMyPos = myPosition?.x === x && myPosition?.y === y
                   const isAdjacentValid = adjacentTargets.has(`${x}:${y}`)
+                  const isBuyTarget = isMyPos && state?.currentTurnUserId === myUserId && state.playState === 'active'
                   const isPathFrom = isSameCoord(myPosition, myPosition) && !!selectedCell && myPosition?.x === x && myPosition?.y === y
                   const showPath =
                     myPosition &&
@@ -649,7 +847,9 @@ function GameBoardPage({ authState }: PageProps) {
                       type="button"
                       className={`grid-cell-btn${ownerUserId > 0 ? ' is-owned' : ''}${isMyCell ? ' is-owned-self' : ''}${
                         isSelected ? ' is-selected' : ''
-                      }${isMyPos ? ' is-my-position' : ''}${isAdjacentValid ? ' is-valid-target' : ''}`}
+                      }${isMyPos ? ' is-my-position' : ''}${isAdjacentValid ? ' is-valid-target' : ''}${
+                        isBuyTarget ? ' is-buy-target' : ''
+                      }`}
                       style={{ ['--cell-owner-color' as string]: ownerColor }}
                       title={cellLabel}
                       onClick={() => {
@@ -690,7 +890,13 @@ function GameBoardPage({ authState }: PageProps) {
                   disabled={moveBusy || !selectedCell || !selectedValidation?.ok}
                   onClick={() => (selectedCell ? void handleMove(selectedCell) : undefined)}
                 >
-                  {moveBusy ? 'Moving...' : selectedCell ? `Move to ${selectedCell.x},${selectedCell.y}` : 'Select a cell'}
+                  {moveBusy
+                    ? 'Working...'
+                    : selectedCell
+                      ? selectedValidation?.ok && selectedValidation.action === 'buy'
+                        ? `Buy at ${selectedCell.x},${selectedCell.y}`
+                        : `Move to ${selectedCell.x},${selectedCell.y}`
+                      : 'Select a cell'}
                 </button>
                 <button
                   type="button"
@@ -707,7 +913,13 @@ function GameBoardPage({ authState }: PageProps) {
                   type="button"
                   className="button button-secondary"
                   disabled={loadingState}
-                  onClick={() => setPollNonce((v) => v + 1)}
+                  onClick={() => {
+                    if (wsConnected && wsClientRef.current?.isConnected()) {
+                      wsClientRef.current.requestState()
+                    } else {
+                      setPollNonce((v) => v + 1)
+                    }
+                  }}
                 >
                   Refresh state
                 </button>
@@ -723,12 +935,28 @@ function GameBoardPage({ authState }: PageProps) {
                     ↦ {move.x},{move.y}
                   </button>
                 ))}
+                {myPosition && state?.currentTurnUserId === myUserId && state.playState === 'active' ? (
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    disabled={moveBusy}
+                    onClick={() => void handleMove(myPosition)}
+                  >
+                    Buy current cell
+                  </button>
+                ) : null}
               </div>
 
               {selectedCell ? (
                 <p className={`meta${selectedValidation?.ok ? '' : ' error-text'}`}>
                   Selected: ({selectedCell.x}, {selectedCell.y})
-                  {selectedValidation?.ok ? ' • valid move target' : selectedValidation ? ` • ${selectedValidation.reason}` : ''}
+                  {selectedValidation?.ok
+                    ? selectedValidation.action === 'buy'
+                      ? ' • buy action'
+                      : ' • valid move target'
+                    : selectedValidation
+                      ? ` • ${selectedValidation.reason}`
+                      : ''}
                 </p>
               ) : (
                 <p className="meta">Tip: single-click selects, double-click attempts move immediately.</p>

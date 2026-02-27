@@ -90,7 +90,7 @@ export type GameState = {
   playState: GamePlayState
 }
 
-export type MovePayload = { x: number; y: number }
+export type MovePayload = { x: number; y: number; buyCell?: boolean }
 
 export type GameMoveResult = {
   game: Game
@@ -571,7 +571,7 @@ export async function moveGame(id: number, move: MovePayload): Promise<GameMoveR
         y: asInt(rawMove.to.y, 'move.to.y'),
       },
       captured: rawMove.captured === true,
-      income: asInt(rawMove.income, 'move.income'),
+      income: Number.isFinite(Number(rawMove.income)) ? Number(rawMove.income) : 0,
     },
   }
 }

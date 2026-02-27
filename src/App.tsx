@@ -271,7 +271,11 @@ function parseRealtimePayload(payload: unknown): RealtimeGamePayload | null {
 
 function resolveWsBaseUrl(): string {
   const envUrl = String(import.meta.env.VITE_WS_BASE_URL ?? '').trim()
-  if (envUrl) return envUrl
+  if (envUrl) {
+    if (envUrl.startsWith('http://')) return `ws://${envUrl.slice('http://'.length)}`
+    if (envUrl.startsWith('https://')) return `wss://${envUrl.slice('https://'.length)}`
+    return envUrl
+  }
 
   if (typeof window !== 'undefined') {
     const host = window.location.hostname.toLowerCase()
@@ -280,7 +284,7 @@ function resolveWsBaseUrl(): string {
     }
   }
 
-  return 'wss://api.gridgame.online/socket/websocket'
+  return 'wss://rt.gridgame.online/socket/websocket'
 }
 
 function validateMoveTarget(
@@ -599,19 +603,10 @@ function GameBoardPage({ authState }: PageProps) {
     wsClientRef.current?.requestState()
   }, [gameId])
 
-  if (authState?.kind !== 'authed') {
-    return (
-      <section className="page-panel">
-        <h1>Game #{gameId}</h1>
-        <p>Please authenticate first to open a game page.</p>
-      </section>
-    )
-  }
-
   const game = liveGame ?? details?.game ?? null
   const players = livePlayers ?? details?.players ?? []
   const state = gameState ?? details?.state ?? null
-  const myUserId = authState.user.id
+  const myUserId = authState?.kind === 'authed' ? authState.user.id : -1
   const myPlayer = players.find((p) => p.userId === myUserId) ?? null
   const orderedUserIds = players.map((p) => p.userId)
 
@@ -675,6 +670,15 @@ function GameBoardPage({ authState }: PageProps) {
     }
     return { totalCells: state.width * state.height, ownedCells, totals }
   }, [state])
+
+  if (authState?.kind !== 'authed') {
+    return (
+      <section className="page-panel">
+        <h1>Game #{gameId}</h1>
+        <p>Please authenticate first to open a game page.</p>
+      </section>
+    )
+  }
 
   const handleMove = async (target: Coord) => {
     const numericId = Number(gameId)

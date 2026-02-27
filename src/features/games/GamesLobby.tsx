@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { AuthState } from '../auth/authApi'
 import {
@@ -12,14 +12,15 @@ import {
   listPlayableGames,
   listPublicGames,
   OpenGamesLimitReachedError,
+  rejectInvitation,
   type CreateGameInput,
   type Game,
   type GameDetails,
   type GameInvitation,
   type Limits,
 } from './gamesApi'
+import { fetchSyncLongPoll } from '../sync/syncApi'
 
-const LIST_REFRESH_MS = 10000
 const CLOCK_REFRESH_MS = 30000
 
 type LobbySnapshot = {
@@ -31,6 +32,7 @@ type LobbySnapshot = {
 }
 
 type LobbyTab = 'overview' | 'my-games' | 'public' | 'invites'
+type GameSortMode = 'latest_activity' | 'created_at' | 'your_turn_first'
 
 type LobbyViewState =
   | { phase: 'idle' }
@@ -46,6 +48,36 @@ function formatDateTime(value: string | null): string {
 
 function gameSort(a: Game, b: Game): number {
   return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+}
+
+function byCreatedAtDesc(a: Game, b: Game): number {
+  return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+}
+
+function byLatestActivityDesc(a: Game, b: Game): number {
+  const aTime = new Date(a.lastMoveAt ?? a.updatedAt ?? a.createdAt).getTime()
+  const bTime = new Date(b.lastMoveAt ?? b.updatedAt ?? b.createdAt).getTime()
+  return bTime - aTime
+}
+
+function byYourTurnFirst(a: Game, b: Game, myUserId: number): number {
+  const aTurn = a.playState === 'active' && a.currentTurnUserId === myUserId ? 1 : 0
+  const bTurn = b.playState === 'active' && b.currentTurnUserId === myUserId ? 1 : 0
+  if (aTurn !== bTurn) return bTurn - aTurn
+  const aFull = a.playersCount >= a.maxPlayers ? 1 : 0
+  const bFull = b.playersCount >= b.maxPlayers ? 1 : 0
+  if (aFull !== bFull) return bFull - aFull
+  return byLatestActivityDesc(a, b)
+}
+
+function sortGamesForView(games: Game[], mode: GameSortMode, myUserId: number): Game[] {
+  const copy = [...games]
+  copy.sort((a, b) => {
+    if (mode === 'created_at') return byCreatedAtDesc(a, b)
+    if (mode === 'your_turn_first') return byYourTurnFirst(a, b, myUserId)
+    return byLatestActivityDesc(a, b)
+  })
+  return copy
 }
 
 function formatHoursLeft(game: Game, moveTimeoutSeconds: number, nowMs: number): string {
@@ -102,6 +134,10 @@ function clampInt(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)))
 }
 
+function formatPlayerLabel(userId: number, meId: number, email: string): string {
+  return userId === meId ? `${email} (you)` : email
+}
+
 type GamesLobbyProps = {
   authState: AuthState | null
 }
@@ -116,6 +152,7 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
   const [createBusy, setCreateBusy] = useState(false)
   const [joinBusy, setJoinBusy] = useState(false)
   const [inviteBusy, setInviteBusy] = useState(false)
+  const [rejectBusyInvitationId, setRejectBusyInvitationId] = useState<number | null>(null)
   const [joinGameIdInput, setJoinGameIdInput] = useState('')
   const [joinTokenInput, setJoinTokenInput] = useState('')
   const [inviteEmailInput, setInviteEmailInput] = useState('')
@@ -128,6 +165,8 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
   const [activeTab, setActiveTab] = useState<LobbyTab>('overview')
   const [joinModalOpen, setJoinModalOpen] = useState(false)
   const [invitePasteInput, setInvitePasteInput] = useState('')
+  const [gameSortMode, setGameSortMode] = useState<GameSortMode>('your_turn_first')
+  const syncCursorRef = useRef<string | null>(null)
   const [createForm, setCreateForm] = useState<CreateGameInput>({
     visibility: 'private',
     maxPlayers: 2,
@@ -178,6 +217,7 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
           pendingInvitations,
           limits: playableRes.limits,
         }
+        syncCursorRef.current = null
         setViewState({ phase: 'ready', data, busy: false, error: null })
         setSelectedGameId((prev) => {
           if (prev && [...data.playableGames, ...data.createdGames].some((g) => g.id === prev)) return prev
@@ -194,13 +234,72 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
     }
 
     void load()
-    const timerId = window.setInterval(() => setRefreshNonce((v) => v + 1), LIST_REFRESH_MS)
     return () => {
       active = false
       controller.abort()
-      window.clearInterval(timerId)
     }
   }, [authState, refreshNonce])
+
+  useEffect(() => {
+    if (authState?.kind !== 'authed' || viewState.phase !== 'ready') return
+    const controller = new AbortController()
+    let active = true
+
+    const delay = (ms: number) =>
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, ms)
+      })
+
+    const run = async () => {
+      while (active && !controller.signal.aborted) {
+        try {
+          const syncCycle = await fetchSyncLongPoll(syncCursorRef.current, undefined, controller.signal)
+          if (!active) return
+          syncCursorRef.current = syncCycle.cursor ?? syncCursorRef.current
+          if (syncCycle.timedOut) continue
+
+          const [playableRes, createdRes, publicRes, pendingInvitations] = await Promise.all([
+            listPlayableGames(controller.signal),
+            listCreatedGames(controller.signal),
+            listPublicGames(controller.signal),
+            listPendingInvitations(controller.signal),
+          ])
+          if (!active) return
+
+          setViewState((prev) => {
+            if (prev.phase !== 'ready') return prev
+            return {
+              phase: 'ready',
+              data: {
+                ...prev.data,
+                playableGames: [...playableRes.games].sort(gameSort),
+                createdGames: [...createdRes.games].sort(gameSort),
+                publicGames: [...publicRes.games].sort(gameSort),
+                pendingInvitations,
+                limits: playableRes.limits,
+              },
+              busy: false,
+              error: null,
+            }
+          })
+          setSelectedGameId((prev) => {
+            if (prev && [...playableRes.games, ...createdRes.games].some((g) => g.id === prev)) return prev
+            return playableRes.games[0]?.id ?? createdRes.games[0]?.id ?? null
+          })
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') return
+          if (!active) return
+          await delay(1500)
+        }
+      }
+    }
+
+    void run()
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [authState, viewState.phase])
 
   useEffect(() => {
     if (authState?.kind !== 'authed' || selectedGameId === null) {
@@ -234,6 +333,14 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
 
   const setSelectedErrorText = (message: string | null) => setDetailsError(message)
   const refreshLobby = () => setRefreshNonce((v) => v + 1)
+  const clickSelectGameCard = (
+    event: MouseEvent<HTMLElement>,
+    id: number,
+  ) => {
+    const target = event.target as HTMLElement
+    if (target.closest('button,a,input,textarea,select,label,summary')) return
+    setSelectedGameId(id)
+  }
 
   const copyText = async (value: string, label: string) => {
     try {
@@ -265,6 +372,9 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
     if (!createForm.randomSize) {
       if (createForm.fieldWidth < 4 || createForm.fieldWidth > 16) return 'Field width must be 4..16.'
       if (createForm.fieldHeight < 4 || createForm.fieldHeight > 16) return 'Field height must be 4..16.'
+      if (createForm.fieldWidth * createForm.fieldHeight < createForm.maxPlayers * 8) {
+        return `Board area must be at least ${createForm.maxPlayers * 8} cells for ${createForm.maxPlayers} players.`
+      }
     }
     return null
   }
@@ -438,6 +548,29 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
     }
   }
 
+  const handleRejectInvitation = async (invitationId: number) => {
+    if (rejectBusyInvitationId !== null) return
+    setRejectBusyInvitationId(invitationId)
+    setJoinMessage(null)
+    try {
+      const rejectedId = await rejectInvitation(invitationId)
+      setViewState((prev) => {
+        if (prev.phase !== 'ready') return prev
+        return {
+          ...prev,
+          data: {
+            ...prev.data,
+            pendingInvitations: prev.data.pendingInvitations.filter((inv) => inv.id !== rejectedId),
+          },
+        }
+      })
+    } catch (error) {
+      setJoinMessage(error instanceof Error ? error.message : 'Failed to reject invitation')
+    } finally {
+      setRejectBusyInvitationId(null)
+    }
+  }
+
   if (authState === null) {
     return (
       <section className="main-stage panel" aria-label="Lobby">
@@ -469,12 +602,22 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
       )
     }
 
-    const { playableGames, createdGames, publicGames, pendingInvitations, limits } = viewState.data
+    const { playableGames, publicGames, pendingInvitations, limits } = viewState.data
     const selectedIsOwner = selectedGame?.createdByUserId === authState.user.id
     const displayedInvitations = selectedDetails?.invitations ?? []
     const showMyGames = activeTab === 'overview' || activeTab === 'my-games'
     const showPublic = activeTab === 'overview' || activeTab === 'public'
     const showInvites = activeTab === 'overview' || activeTab === 'invites'
+    const sortedPlayableGames = sortGamesForView(playableGames, gameSortMode, authState.user.id)
+    const sortedPublicGames = sortGamesForView(publicGames, gameSortMode, authState.user.id)
+    const latestEventByActor = new Map<number, { type: string; createdAt: string }>()
+    for (const ev of selectedDetails?.events ?? []) {
+      if (ev.actorUserId === null) continue
+      const prev = latestEventByActor.get(ev.actorUserId)
+      if (!prev || new Date(ev.createdAt).getTime() > new Date(prev.createdAt).getTime()) {
+        latestEventByActor.set(ev.actorUserId, { type: ev.type, createdAt: ev.createdAt })
+      }
+    }
 
     return (
       <div className="lobby-grid">
@@ -524,7 +667,11 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
           </div>
 
           {showMyGames ? (
-          <section className="panel panel-inset">
+          <details className="panel panel-inset collapsible-panel">
+            <summary className="collapsible-summary">
+              <span className="section-title">Create Game</span>
+            </summary>
+            <div className="collapsible-body">
             <h3 className="section-title">Create Game</h3>
             <div className="join-grid">
               <div>
@@ -560,33 +707,35 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
               </div>
               <div>
                 <label className="field-label" htmlFor="create-width">Field width</label>
-                <input
+                <select
                   id="create-width"
                   className="field-input"
-                  type="number"
-                  min={4}
-                  max={16}
                   value={createForm.fieldWidth}
                   disabled={createBusy || createForm.randomSize}
                   onChange={(e) =>
                     setCreateForm((p) => ({ ...p, fieldWidth: clampInt(Number(e.target.value || 4), 4, 16) }))
                   }
-                />
+                >
+                  {Array.from({ length: 13 }, (_, i) => 4 + i).map((size) => (
+                    <option key={`width-${size}`} value={size}>{size}</option>
+                  ))}
+                </select>
               </div>
               <div>
                 <label className="field-label" htmlFor="create-height">Field height</label>
-                <input
+                <select
                   id="create-height"
                   className="field-input"
-                  type="number"
-                  min={4}
-                  max={16}
                   value={createForm.fieldHeight}
                   disabled={createBusy || createForm.randomSize}
                   onChange={(e) =>
                     setCreateForm((p) => ({ ...p, fieldHeight: clampInt(Number(e.target.value || 4), 4, 16) }))
                   }
-                />
+                >
+                  {Array.from({ length: 13 }, (_, i) => 4 + i).map((size) => (
+                    <option key={`height-${size}`} value={size}>{size}</option>
+                  ))}
+                </select>
               </div>
             </div>
             <label className="checkbox-row">
@@ -606,74 +755,83 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
             </div>
             {createMessage ? <p className="meta">{createMessage}</p> : null}
             {viewState.error ? <p className="error-text">{viewState.error}</p> : null}
-          </section>
+            </div>
+          </details>
           ) : null}
 
-          {showInvites ? (
+          {showInvites && pendingInvitations.length > 0 ? (
           <section className="panel panel-inset">
             <h3 className="section-title">Pending Invitations</h3>
-            {pendingInvitations.length === 0 ? (
-              <p className="meta">No pending invitations for your email.</p>
-            ) : (
-              <ul className="simple-list">
-                {pendingInvitations.map((inv) => {
-                  const gameIdMatch = inv.joinApiPath.match(/\/api\/games\/(\d+)\/join$/)
-                  const gameId = gameIdMatch ? Number(gameIdMatch[1]) : null
-                  return (
-                    <li key={`pending-${inv.id}`}>
-                      <div>
-                        <strong>{inv.email}</strong>
-                        <span className="meta inline-meta"> • created {formatDateTime(inv.createdAt)}</span>
-                      </div>
-                      <div className="meta token-line">Invite path: {inv.frontendInvitePath}</div>
-                      <div className="lobby-toolbar">
-                        {gameId ? (
-                          <button
-                            type="button"
-                            className="button"
-                            onClick={() => void handleJoin(gameId, inv.token)}
-                            disabled={joinBusy || !limits.canJoinGame}
-                          >
-                            {joinBusy ? 'Joining...' : `Join game #${gameId}`}
-                          </button>
-                        ) : null}
-                        {gameId ? (
-                          <button
-                            type="button"
-                            className="button button-secondary"
-                            onClick={() => {
-                              setJoinGameIdInput(String(gameId))
-                              setJoinTokenInput(inv.token)
-                            }}
-                          >
-                            Fill join form
-                          </button>
-                        ) : null}
+            <ul className="simple-list">
+              {pendingInvitations.map((inv) => {
+                const gameIdMatch = inv.joinApiPath.match(/\/api\/games\/(\d+)\/join$/)
+                const gameId = gameIdMatch ? Number(gameIdMatch[1]) : null
+                return (
+                  <li key={`pending-${inv.id}`}>
+                    <div>
+                      <strong>{inv.email}</strong>
+                      <span className="meta inline-meta"> • created {formatDateTime(inv.createdAt)}</span>
+                    </div>
+                    <div className="meta token-line">Invite path: {inv.frontendInvitePath}</div>
+                    <div className="lobby-toolbar">
+                      {gameId ? (
+                        <button
+                          type="button"
+                          className="button"
+                          onClick={() => void handleJoin(gameId, inv.token)}
+                          disabled={joinBusy || !limits.canJoinGame}
+                        >
+                          {joinBusy ? 'Joining...' : `Join game #${gameId}`}
+                        </button>
+                      ) : null}
+                      {gameId ? (
                         <button
                           type="button"
                           className="button button-secondary"
-                          onClick={() => void copyText(inv.frontendInvitePath, 'Invite link')}
+                          onClick={() => {
+                            setJoinGameIdInput(String(gameId))
+                            setJoinTokenInput(inv.token)
+                          }}
                         >
-                          Copy link
+                          Fill join form
                         </button>
-                        <button
-                          type="button"
-                          className="button button-secondary"
-                          onClick={() => void copyText(inv.token, 'Invite token')}
-                        >
-                          Copy token
-                        </button>
-                      </div>
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
+                      ) : null}
+                      <button
+                        type="button"
+                        className="button button-secondary"
+                        onClick={() => void copyText(inv.frontendInvitePath, 'Invite link')}
+                      >
+                        Copy link
+                      </button>
+                      <button
+                        type="button"
+                        className="button button-secondary"
+                        onClick={() => void copyText(inv.token, 'Invite token')}
+                      >
+                        Copy token
+                      </button>
+                      <button
+                        type="button"
+                        className="button button-danger"
+                        onClick={() => void handleRejectInvitation(inv.id)}
+                        disabled={rejectBusyInvitationId === inv.id}
+                      >
+                        {rejectBusyInvitationId === inv.id ? 'Rejecting...' : 'Reject'}
+                      </button>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
           </section>
           ) : null}
 
           {showInvites ? (
-          <section className="panel panel-inset">
+          <details className="panel panel-inset collapsible-panel">
+            <summary className="collapsible-summary">
+              <span className="section-title">Join Private Game (Token)</span>
+            </summary>
+            <div className="collapsible-body">
             <h3 className="section-title">Join Private Game (Token)</h3>
             <div className="join-grid">
               <div>
@@ -691,25 +849,32 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
               </button>
             </div>
             {joinMessage ? <p className="meta">{joinMessage}</p> : null}
-          </section>
+            </div>
+          </details>
           ) : null}
 
           {showPublic ? (
           <section className="panel panel-inset">
             <h3 className="section-title">Public Games</h3>
-            {publicGames.length === 0 ? (
+            {sortedPublicGames.length === 0 ? (
               <p className="meta">No joinable public games available right now.</p>
             ) : (
               <ul className="game-list">
-                {publicGames.map((game) => (
-                  <li key={`public-${game.id}`} className="game-card compact-card">
+                {sortedPublicGames.map((game) => (
+                  <li
+                    key={`public-${game.id}`}
+                    className="game-card compact-card compact-game-card"
+                    onClick={(e) => clickSelectGameCard(e, game.id)}
+                  >
                     <div className="game-card-row">
                       <strong>Game #{game.id}</strong>
                       <span className="pill pill-open">public</span>
                     </div>
-                    <p className="meta">
-                      Players {game.playersCount}/{game.maxPlayers} • Board {game.fieldWidth}x{game.fieldHeight}
-                    </p>
+                    <div className="game-badges-line">
+                      <span className="mini-pill">Players {game.playersCount}/{game.maxPlayers}</span>
+                      <span className="mini-pill">{game.fieldWidth}x{game.fieldHeight}</span>
+                      {game.playState === 'active' ? <span className="mini-pill mini-pill-strong">active</span> : null}
+                    </div>
                     <div className="game-card-actions">
                       <button
                         type="button"
@@ -718,9 +883,6 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
                         disabled={joinBusy || !limits.canJoinGame}
                       >
                         {joinBusy ? 'Joining...' : 'Join public game'}
-                      </button>
-                      <button type="button" className="button button-secondary" onClick={() => setSelectedGameId(game.id)}>
-                        Inspect
                       </button>
                     </div>
                   </li>
@@ -732,32 +894,55 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
 
           {showMyGames ? (
           <section className="panel panel-inset">
-            <h3 className="section-title">My Games (Playable)</h3>
-            {playableGames.length === 0 ? (
+            <div className="game-list-toolbar">
+              <h3 className="section-title">My Games (Playable + Created)</h3>
+              <div className="sort-inline">
+                <label className="field-label" htmlFor="game-sort-mode">Sort</label>
+                <select
+                  id="game-sort-mode"
+                  className="field-input compact-select"
+                  value={gameSortMode}
+                  onChange={(e) => setGameSortMode(e.target.value as GameSortMode)}
+                >
+                  <option value="your_turn_first">Your turn first</option>
+                  <option value="latest_activity">Latest activity</option>
+                  <option value="created_at">Created date</option>
+                </select>
+              </div>
+            </div>
+            {sortedPlayableGames.length === 0 ? (
               <p className="meta">No playable games yet.</p>
             ) : (
               <ul className="game-list">
-                {playableGames.map((game) => {
+                {sortedPlayableGames.map((game) => {
                   const isSelected = selectedGameId === game.id
                   const isOwner = game.createdByUserId === authState.user.id
                   const busy = actionBusyGameId === game.id
+                  const isFull = game.playersCount >= game.maxPlayers
+                  const isMyTurn = game.playState === 'active' && game.currentTurnUserId === authState.user.id
                   return (
-                    <li key={`playable-${game.id}`} className={`game-card ${isSelected ? 'is-selected' : ''}`}>
+                    <li
+                      key={`playable-${game.id}`}
+                      className={`game-card compact-game-card ${isSelected ? 'is-selected' : ''}${isMyTurn ? ' is-priority' : ''}`}
+                      onClick={(e) => clickSelectGameCard(e, game.id)}
+                    >
                       <div className="game-card-row">
                         <strong>Game #{game.id}</strong>
                         <span className={`pill ${game.status === 'open' ? 'pill-open' : 'pill-closed'}`}>{game.status}</span>
                       </div>
-                      <p className="meta">
-                        {game.visibility} • {isOwner ? 'owner' : 'participant'} • Players {game.playersCount}/{game.maxPlayers}
-                      </p>
-                      <p className="meta">
-                        Board {game.fieldWidth}x{game.fieldHeight}{game.randomSize ? ' (random)' : ''} • {formatHoursLeft(game, limits.moveTimeoutSeconds, nowMs)}
-                      </p>
+                      <div className="game-badges-line">
+                        <span className="mini-pill">{game.visibility}</span>
+                        <span className="mini-pill">{isOwner ? 'owner' : 'joined'}</span>
+                        <span className="mini-pill">P {game.playersCount}/{game.maxPlayers}</span>
+                        <span className="mini-pill">{game.fieldWidth}x{game.fieldHeight}</span>
+                        <span className={`mini-pill ${isMyTurn ? 'mini-pill-strong' : ''}`}>
+                          {isMyTurn ? 'your turn' : game.playState}
+                        </span>
+                        {isFull ? <span className="mini-pill mini-pill-full">full</span> : null}
+                      </div>
+                      <p className="meta compact-card-meta">{formatHoursLeft(game, limits.moveTimeoutSeconds, nowMs)}</p>
                       <div className="game-card-actions">
                         <Link to={`/games/${game.id}`} className="button button-secondary nav-button">Game page</Link>
-                        <button type="button" className="button button-secondary" onClick={() => setSelectedGameId(game.id)}>
-                          {isSelected ? 'Selected' : 'Details'}
-                        </button>
                         <button
                           type="button"
                           className="button button-danger"
@@ -770,35 +955,6 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
                     </li>
                   )
                 })}
-              </ul>
-            )}
-          </section>
-          ) : null}
-
-          {showMyGames ? (
-          <section className="panel panel-inset">
-            <h3 className="section-title">Created By Me</h3>
-            {createdGames.length === 0 ? (
-              <p className="meta">No created games yet.</p>
-            ) : (
-              <ul className="game-list">
-                {createdGames.map((game) => (
-                  <li key={`created-${game.id}`} className="game-card compact-card">
-                    <div className="game-card-row">
-                      <strong>Game #{game.id}</strong>
-                      <span className={`pill ${game.status === 'open' ? 'pill-open' : 'pill-closed'}`}>{game.status}</span>
-                    </div>
-                    <p className="meta">
-                      {game.visibility} • Players {game.playersCount}/{game.maxPlayers} • {game.fieldWidth}x{game.fieldHeight}
-                    </p>
-                    <div className="game-card-actions">
-                      <button type="button" className="button button-secondary" onClick={() => setSelectedGameId(game.id)}>
-                        Open details
-                      </button>
-                      <Link to={`/games/${game.id}`} className="button button-secondary nav-button">Game page</Link>
-                    </div>
-                  </li>
-                ))}
               </ul>
             )}
           </section>
@@ -850,24 +1006,40 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
                   <p className="meta">No players yet.</p>
                 ) : (
                   <ul className="simple-list">
-                    {selectedDetails.players.map((p) => (
+                    {selectedDetails.players.map((p) => {
+                      const isTurn = selectedGame.currentTurnUserId === p.userId && selectedGame.playState === 'active'
+                      const latest = latestEventByActor.get(p.userId)
+                      return (
                       <li key={p.id}>
                         <div>
-                          <strong>{p.email}</strong>
+                          <strong>{formatPlayerLabel(p.userId, authState.user.id, p.email)}</strong>
                           <span className="meta inline-meta"> • user #{p.userId}</span>
+                          {isTurn ? <span className="meta inline-meta"> • current turn</span> : null}
                         </div>
                         <div className="meta">
                           {p.status}
                           {p.gaveUpAt ? ` • gave up ${formatDateTime(p.gaveUpAt)}` : ''} • joined {formatDateTime(p.joinedAt)}
                         </div>
+                        {latest ? (
+                          <div className="meta">
+                            latest action: <strong>{latest.type}</strong> • {formatDateTime(latest.createdAt)}
+                          </div>
+                        ) : (
+                          <div className="meta">latest action: —</div>
+                        )}
                       </li>
-                    ))}
+                      )
+                    })}
                   </ul>
                 )}
               </section>
 
               {selectedIsOwner ? (
-                <section className="panel panel-inset">
+                <details className="panel panel-inset collapsible-panel">
+                  <summary className="collapsible-summary">
+                    <span className="section-title">Create Invitation (Owner)</span>
+                  </summary>
+                  <div className="collapsible-body">
                   <h4 className="section-title">Create Invitation (Owner)</h4>
                   <div className="join-grid">
                     <div>
@@ -893,15 +1065,15 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
                     </button>
                   </div>
                   {inviteMessage ? <p className="meta">{inviteMessage}</p> : null}
-                </section>
+                  </div>
+                </details>
               ) : null}
 
+              {displayedInvitations.length > 0 ? (
               <section className="panel panel-inset">
                 <h4 className="section-title">Invitations</h4>
                 {!selectedDetails ? (
                   <p className="meta">Load details to see invitations.</p>
-                ) : displayedInvitations.length === 0 ? (
-                  <p className="meta">No invitations.</p>
                 ) : (
                   <ul className="simple-list">
                     {displayedInvitations.map((inv) => (
@@ -936,32 +1108,38 @@ export function GamesLobby({ authState }: GamesLobbyProps) {
                   </ul>
                 )}
               </section>
+              ) : null}
 
-              <section className="panel panel-inset">
-                <h4 className="section-title">Events</h4>
-                {!selectedDetails ? (
-                  <p className="meta">Load details to see events.</p>
-                ) : selectedDetails.events.length === 0 ? (
-                  <p className="meta">No events yet.</p>
-                ) : (
-                  <ul className="simple-list">
-                    {selectedDetails.events.map((event) => (
-                      <li key={event.id}>
-                        <div>
-                          <strong>{event.type}</strong>
-                          <span className="meta inline-meta">
-                            {' '}
-                            • event #{event.id}
-                            {event.actorUserId !== null ? ` • actor user #${event.actorUserId}` : ''}
-                          </span>
-                        </div>
-                        <div className="meta">{formatDateTime(event.createdAt)}</div>
-                        <pre className="event-payload">{JSON.stringify(event.payload, null, 2)}</pre>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
+              <details className="panel panel-inset collapsible-panel">
+                <summary className="collapsible-summary">
+                  <span className="section-title">Debug Events (dev)</span>
+                </summary>
+                <div className="collapsible-body">
+                  <h4 className="section-title">Events</h4>
+                  {!selectedDetails ? (
+                    <p className="meta">Load details to see events.</p>
+                  ) : selectedDetails.events.length === 0 ? (
+                    <p className="meta">No events yet.</p>
+                  ) : (
+                    <ul className="simple-list">
+                      {selectedDetails.events.map((event) => (
+                        <li key={event.id}>
+                          <div>
+                            <strong>{event.type}</strong>
+                            <span className="meta inline-meta">
+                              {' '}
+                              • event #{event.id}
+                              {event.actorUserId !== null ? ` • actor user #${event.actorUserId}` : ''}
+                            </span>
+                          </div>
+                          <div className="meta">{formatDateTime(event.createdAt)}</div>
+                          <pre className="event-payload">{JSON.stringify(event.payload, null, 2)}</pre>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </details>
             </>
           ) : null}
         </section>

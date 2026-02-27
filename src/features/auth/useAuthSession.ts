@@ -21,7 +21,6 @@ export function useAuthSession() {
     busy: false,
     error: null,
   })
-
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const authState = await fetchCurrentUser(signal)
     setState((prev) => ({

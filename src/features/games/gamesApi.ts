@@ -1,14 +1,18 @@
 export type GameStatus = 'open' | 'closed'
 export type GameVisibility = 'private' | 'public'
 export type GameCloseReason = 'give_up' | 'timeout' | 'last_standing' | null
+export type GamePlayState = 'lobby' | 'active' | 'closed'
 
 export type Game = {
   id: number
   createdByUserId: number
   status: GameStatus
+  playState: GamePlayState
   closeReason: GameCloseReason
   pointsAtStake: number
   winnerUserId: number | null
+  currentTurnUserId: number | null
+  turnNumber: number
   visibility: GameVisibility
   maxPlayers: number
   playersCount: number
@@ -16,6 +20,7 @@ export type Game = {
   fieldHeight: number
   randomSize: boolean
   createdAt: string
+  startedAt: string | null
   updatedAt: string
   lastMoveAt: string | null
   closedAt: string | null
@@ -42,6 +47,10 @@ export type GamePlayer = {
   joinedAt: string
   status: 'active' | 'gave_up'
   gaveUpAt: string | null
+  positionX: number | null
+  positionY: number | null
+  capturedCellsCount: number
+  gameScore: number
 }
 
 export type GameInvitation = {
@@ -64,9 +73,32 @@ export type GameEvent = {
 
 export type GameDetails = {
   game: Game
+  state: GameState | null
   players: GamePlayer[]
   invitations: GameInvitation[]
   events: GameEvent[]
+}
+
+export type GameState = {
+  width: number
+  height: number
+  cells: number[][]
+  currentTurnUserId: number | null
+  turnNumber: number
+  playState: GamePlayState
+}
+
+export type MovePayload = { x: number; y: number }
+
+export type GameMoveResult = {
+  game: Game
+  state: GameState
+  players: GamePlayer[]
+  move: {
+    to: { x: number; y: number }
+    captured: boolean
+    income: number
+  }
 }
 
 export type CreateGameInput = {
@@ -79,11 +111,15 @@ export type CreateGameInput = {
 
 type GamesListResponse = { games?: unknown; limits?: unknown }
 type GameWithLimitsResponse = { game?: unknown; limits?: unknown }
-type GameShowResponse = { game?: unknown; players?: unknown; invitations?: unknown; events?: unknown }
-type GameJoinResponse = { game?: unknown; players?: unknown; limits?: unknown }
+type GameShowResponse = { game?: unknown; state?: unknown; players?: unknown; invitations?: unknown; events?: unknown }
+type GameJoinResponse = { game?: unknown; state?: unknown; players?: unknown; limits?: unknown }
+type GameStateResponse = { game?: unknown; state?: unknown; players?: unknown }
+type GameMoveResponse = { game?: unknown; state?: unknown; players?: unknown; move?: unknown }
 type InvitationCreateResponse = { invitation?: unknown }
 type PendingInvitationsResponse = { invitations?: unknown }
+type InvitationRejectResponse = { rejectedInvitationId?: unknown }
 type ErrorResponse = { message?: unknown; limits?: unknown }
+type LongPollMetaResponse = { cursor?: unknown; timeout?: unknown }
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
 
@@ -110,10 +146,14 @@ function parseGame(value: unknown): Game {
   if (!isObject(value)) throw new Error('Invalid game payload')
 
   const status = value.status
+  const playState = value.playState
   const visibility = value.visibility
   const closeReason = value.closeReason
 
   if (status !== 'open' && status !== 'closed') throw new Error('Invalid game.status')
+  if (playState !== 'lobby' && playState !== 'active' && playState !== 'closed') {
+    throw new Error('Invalid game.playState')
+  }
   if (visibility !== 'private' && visibility !== 'public') throw new Error('Invalid game.visibility')
   if (
     closeReason !== 'give_up' &&
@@ -128,9 +168,13 @@ function parseGame(value: unknown): Game {
     id: asInt(value.id, 'game.id'),
     createdByUserId: asInt(value.createdByUserId, 'game.createdByUserId'),
     status,
+    playState,
     closeReason,
     pointsAtStake: Number(value.pointsAtStake ?? 0),
     winnerUserId: value.winnerUserId === null ? null : asInt(value.winnerUserId, 'game.winnerUserId'),
+    currentTurnUserId:
+      value.currentTurnUserId === null ? null : asInt(value.currentTurnUserId, 'game.currentTurnUserId'),
+    turnNumber: asInt(value.turnNumber, 'game.turnNumber'),
     visibility,
     maxPlayers: asInt(value.maxPlayers, 'game.maxPlayers'),
     playersCount: asInt(value.playersCount, 'game.playersCount'),
@@ -138,6 +182,7 @@ function parseGame(value: unknown): Game {
     fieldHeight: asInt(value.fieldHeight, 'game.fieldHeight'),
     randomSize: value.randomSize === true,
     createdAt: asString(value.createdAt, 'game.createdAt'),
+    startedAt: value.startedAt === null ? null : asString(value.startedAt, 'game.startedAt'),
     updatedAt: asString(value.updatedAt, 'game.updatedAt'),
     lastMoveAt: value.lastMoveAt === null ? null : asString(value.lastMoveAt, 'game.lastMoveAt'),
     closedAt: value.closedAt === null ? null : asString(value.closedAt, 'game.closedAt'),
@@ -177,8 +222,35 @@ function parsePlayers(value: unknown): GamePlayer[] {
       joinedAt: asString(row.joinedAt, 'player.joinedAt'),
       status,
       gaveUpAt: row.gaveUpAt === null ? null : asString(row.gaveUpAt, 'player.gaveUpAt'),
+      positionX: row.positionX === null ? null : asInt(row.positionX, 'player.positionX'),
+      positionY: row.positionY === null ? null : asInt(row.positionY, 'player.positionY'),
+      capturedCellsCount: asInt(row.capturedCellsCount, 'player.capturedCellsCount'),
+      gameScore: asInt(row.gameScore, 'player.gameScore'),
     }
   })
+}
+
+function parseGameState(value: unknown): GameState | null {
+  if (value === null || value === undefined) return null
+  if (!isObject(value)) throw new Error('Invalid game state payload')
+  const playState = value.playState
+  if (playState !== 'lobby' && playState !== 'active' && playState !== 'closed') {
+    throw new Error('Invalid state.playState')
+  }
+  if (!Array.isArray(value.cells)) throw new Error('Invalid state.cells')
+  const cells = value.cells.map((row, y) => {
+    if (!Array.isArray(row)) throw new Error(`Invalid state.cells[${y}]`)
+    return row.map((cell, x) => asInt(cell, `state.cells[${y}][${x}]`))
+  })
+  return {
+    width: asInt(value.width, 'state.width'),
+    height: asInt(value.height, 'state.height'),
+    cells,
+    currentTurnUserId:
+      value.currentTurnUserId === null ? null : asInt(value.currentTurnUserId, 'state.currentTurnUserId'),
+    turnNumber: asInt(value.turnNumber, 'state.turnNumber'),
+    playState,
+  }
 }
 
 function parseInvitations(value: unknown): GameInvitation[] {
@@ -234,11 +306,28 @@ export class OpenGamesLimitReachedError extends Error {
   }
 }
 
+export type LongPollCycle<T> = {
+  data: T
+  cursor: string | null
+  timedOut: boolean
+}
+
 async function parseGamesListResponse(response: Response): Promise<{ games: Game[]; limits: Limits }> {
   const data = (await readJson(response)) as GamesListResponse
   const games = Array.isArray(data.games) ? data.games.map(parseGame) : []
   const limits = parseLimits(data.limits)
   return { games, limits }
+}
+
+function parseLongPollMeta(data: LongPollMetaResponse): {
+  cursor: string | null
+  timedOut: boolean
+} {
+  return {
+    cursor:
+      typeof data.cursor === 'string' && data.cursor.trim() !== '' ? data.cursor : null,
+    timedOut: data.timeout === true,
+  }
 }
 
 export async function listPlayableGames(signal?: AbortSignal): Promise<{ games: Game[]; limits: Limits }> {
@@ -251,6 +340,30 @@ export async function listPlayableGames(signal?: AbortSignal): Promise<{ games: 
   if (response.status === 401) throw new Error('Authentication required')
   if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
   return parseGamesListResponse(response)
+}
+
+export async function listPlayableGamesLongPoll(
+  sinceCursor: string | null,
+  signal?: AbortSignal,
+): Promise<LongPollCycle<{ games: Game[]; limits: Limits }>> {
+  const query = new URLSearchParams({ timeoutSeconds: '25' })
+  if (sinceCursor) query.set('since', sinceCursor)
+  const response = await fetch(apiUrl(`/api/games/long-poll?${query.toString()}`), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  const data = (await readJson(response)) as GamesListResponse & LongPollMetaResponse
+  return {
+    data: {
+      games: Array.isArray(data.games) ? data.games.map(parseGame) : [],
+      limits: parseLimits(data.limits),
+    },
+    ...parseLongPollMeta(data),
+  }
 }
 
 export async function listCreatedGames(signal?: AbortSignal): Promise<{ games: Game[]; limits: Limits }> {
@@ -277,6 +390,30 @@ export async function listPublicGames(signal?: AbortSignal): Promise<{ games: Ga
   return parseGamesListResponse(response)
 }
 
+export async function listPublicGamesLongPoll(
+  sinceCursor: string | null,
+  signal?: AbortSignal,
+): Promise<LongPollCycle<{ games: Game[]; limits: Limits }>> {
+  const query = new URLSearchParams({ timeoutSeconds: '25' })
+  if (sinceCursor) query.set('since', sinceCursor)
+  const response = await fetch(apiUrl(`/api/games/public/long-poll?${query.toString()}`), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  const data = (await readJson(response)) as GamesListResponse & LongPollMetaResponse
+  return {
+    data: {
+      games: Array.isArray(data.games) ? data.games.map(parseGame) : [],
+      limits: parseLimits(data.limits),
+    },
+    ...parseLongPollMeta(data),
+  }
+}
+
 export async function listPendingInvitations(signal?: AbortSignal): Promise<GameInvitation[]> {
   const response = await fetch(apiUrl('/api/invitations'), {
     method: 'GET',
@@ -288,6 +425,27 @@ export async function listPendingInvitations(signal?: AbortSignal): Promise<Game
   if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
   const data = (await readJson(response)) as PendingInvitationsResponse
   return parseInvitations(data.invitations)
+}
+
+export async function listPendingInvitationsLongPoll(
+  sinceCursor: string | null,
+  signal?: AbortSignal,
+): Promise<LongPollCycle<GameInvitation[]>> {
+  const query = new URLSearchParams({ timeoutSeconds: '25' })
+  if (sinceCursor) query.set('since', sinceCursor)
+  const response = await fetch(apiUrl(`/api/invitations/long-poll?${query.toString()}`), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  const data = (await readJson(response)) as PendingInvitationsResponse & LongPollMetaResponse
+  return {
+    data: parseInvitations(data.invitations),
+    ...parseLongPollMeta(data),
+  }
 }
 
 export async function createGame(input: CreateGameInput): Promise<{ game: Game; limits: Limits }> {
@@ -336,9 +494,89 @@ export async function getGameDetails(id: number, signal?: AbortSignal): Promise<
   const data = (await readJson(response)) as GameShowResponse
   return {
     game: parseGame(data.game),
+    state: parseGameState(data.state),
     players: parsePlayers(data.players),
     invitations: parseInvitations(data.invitations),
     events: parseEvents(data.events),
+  }
+}
+
+export async function getGameState(
+  id: number,
+  signal?: AbortSignal,
+): Promise<{ game: Game; state: GameState | null; players: GamePlayer[] }> {
+  const response = await fetch(apiUrl(`/api/games/${id}/state`), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (response.status === 404) throw new Error('Game not found')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  const data = (await readJson(response)) as GameStateResponse
+  return {
+    game: parseGame(data.game),
+    state: parseGameState(data.state),
+    players: parsePlayers(data.players),
+  }
+}
+
+export async function getGameStateLongPoll(
+  id: number,
+  sinceCursor: string | null,
+  signal?: AbortSignal,
+): Promise<LongPollCycle<{ game: Game; state: GameState | null; players: GamePlayer[] }>> {
+  const query = new URLSearchParams({ timeoutSeconds: '25' })
+  if (sinceCursor) query.set('since', sinceCursor)
+  const response = await fetch(apiUrl(`/api/games/${id}/state/long-poll?${query.toString()}`), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (response.status === 404) throw new Error('Game not found')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  const data = (await readJson(response)) as GameStateResponse & LongPollMetaResponse
+  return {
+    data: {
+      game: parseGame(data.game),
+      state: parseGameState(data.state),
+      players: parsePlayers(data.players),
+    },
+    ...parseLongPollMeta(data),
+  }
+}
+
+export async function moveGame(id: number, move: MovePayload): Promise<GameMoveResult> {
+  const response = await fetch(apiUrl(`/api/games/${id}/move`), {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(move),
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (response.status === 404) throw new Error('Game not found')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  const data = (await readJson(response)) as GameMoveResponse
+  const rawMove = data.move
+  if (!isObject(rawMove) || !isObject(rawMove.to)) throw new Error('Invalid move response')
+  return {
+    game: parseGame(data.game),
+    state: parseGameState(data.state) ?? (() => { throw new Error('Missing game state') })(),
+    players: parsePlayers(data.players),
+    move: {
+      to: {
+        x: asInt(rawMove.to.x, 'move.to.x'),
+        y: asInt(rawMove.to.y, 'move.to.y'),
+      },
+      captured: rawMove.captured === true,
+      income: asInt(rawMove.income, 'move.income'),
+    },
   }
 }
 
@@ -361,7 +599,7 @@ export async function giveUpGame(id: number): Promise<{ game: Game; limits: Limi
 export async function joinGame(
   id: number,
   token?: string,
-): Promise<{ game: Game; players: GamePlayer[]; limits: Limits }> {
+): Promise<{ game: Game; state: GameState | null; players: GamePlayer[]; limits: Limits }> {
   const hasToken = typeof token === 'string' && token.trim() !== ''
   const response = await fetch(apiUrl(`/api/games/${id}/join`), {
     method: 'POST',
@@ -377,6 +615,7 @@ export async function joinGame(
   const data = (await readJson(response)) as GameJoinResponse
   return {
     game: parseGame(data.game),
+    state: parseGameState(data.state),
     players: parsePlayers(data.players),
     limits: parseLimits(data.limits),
   }
@@ -398,4 +637,17 @@ export async function createInvitation(gameId: number, email: string): Promise<G
   const parsed = parseInvitations([data.invitation])
   if (!parsed[0]) throw new Error('Invalid invitation response')
   return parsed[0]
+}
+
+export async function rejectInvitation(invitationId: number): Promise<number> {
+  const response = await fetch(apiUrl(`/api/invitations/${invitationId}/reject`), {
+    method: 'POST',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) throw new Error('Authentication required')
+  if (response.status === 404) throw new Error('Invitation not found')
+  if (!response.ok) throw new Error(await readErrorMessage(response, `HTTP ${response.status}`))
+  const data = (await readJson(response)) as InvitationRejectResponse
+  return asInt(data.rejectedInvitationId, 'rejectedInvitationId')
 }

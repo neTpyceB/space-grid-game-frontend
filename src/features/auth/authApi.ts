@@ -11,6 +11,10 @@ type MeResponse = {
   authenticated?: unknown
   user?: unknown
 }
+type MeLongPollResponse = MeResponse & {
+  cursor?: unknown
+  timeout?: unknown
+}
 
 type EmailAuthResponse = {
   status?: unknown
@@ -22,6 +26,12 @@ type EmailAuthResponse = {
 export type AuthState =
   | { kind: 'guest' }
   | { kind: 'authed'; user: AuthUser; created?: boolean }
+
+export type AuthLongPollCycle = {
+  authState: AuthState
+  cursor: string | null
+  timedOut: boolean
+}
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
 
@@ -79,6 +89,42 @@ export async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthState>
   }
 
   return { kind: 'guest' }
+}
+
+export async function fetchCurrentUserLongPoll(
+  sinceCursor: string | null,
+  signal?: AbortSignal,
+): Promise<AuthLongPollCycle> {
+  const query = new URLSearchParams({ timeoutSeconds: '25' })
+  if (sinceCursor) query.set('since', sinceCursor)
+
+  const response = await fetch(apiUrl(`/api/auth/me/long-poll?${query.toString()}`), {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers: {
+      Accept: 'application/json',
+    },
+  })
+
+  if (response.status === 401) {
+    return { authState: { kind: 'guest' }, cursor: sinceCursor, timedOut: false }
+  }
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`)
+  }
+
+  const data = (await response.json()) as MeLongPollResponse
+  const user = parseUser(data.user)
+  const authState: AuthState =
+    data.authenticated === true && user ? { kind: 'authed', user } : { kind: 'guest' }
+
+  return {
+    authState,
+    cursor: typeof data.cursor === 'string' && data.cursor.trim() !== '' ? data.cursor : null,
+    timedOut: data.timeout === true,
+  }
 }
 
 export async function authByEmail(email: string): Promise<AuthState> {
